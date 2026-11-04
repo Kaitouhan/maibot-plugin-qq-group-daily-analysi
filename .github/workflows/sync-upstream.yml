@@ -1,0 +1,34 @@
+name: 每日同步上游
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e '.[dev]' maibot-plugin-sdk==2.16.0
+      - run: python scripts/sync_upstream.py
+      - run: ruff check .
+      - run: pyright --pythonpath "$(command -v python)"
+      - run: pytest -q
+      - name: 检查通过后提交允许同步的文件
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add vendor/unified_message.py vendor/prompts.json LICENSE upstream.lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m 'chore: 自动同步并验证上游消息契约与提示词'
+            git push origin HEAD:${{ github.event.repository.default_branch }}
+          fi
