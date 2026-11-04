@@ -1,0 +1,1 @@
+# maibot-plugin-qq-group-daily-analysi
