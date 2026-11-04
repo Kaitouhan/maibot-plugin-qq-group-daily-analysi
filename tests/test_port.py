@@ -183,6 +183,32 @@ async def test_shutdown_cancels_workers(tmp_path: Path) -> None:
     assert task.cancelled() and not plugin.workers
 
 
+async def test_lifecycle_default_schedule_is_quiet(tmp_path: Path) -> None:
+    host = Host()
+    plugin = make_plugin(tmp_path, host)
+    await plugin.on_load()
+    await asyncio.sleep(0)
+    await plugin.on_unload()
+    assert not any(name.startswith("send.") for name, _ in host.calls)
+    assert plugin.scheduler and plugin.scheduler.cancelled()
+
+
+def test_manifest_and_config_version() -> None:
+    root = Path(__file__).resolve().parents[1]
+    manifest = json.loads((root / "_manifest.json").read_text(encoding="utf-8"))
+    config = DailyAnalysisPlugin.build_default_config()
+    assert manifest["version"] == config["plugin"]["config_version"]
+    assert manifest["host_application"]["min_version"] == "1.3.15"
+    assert set(manifest["capabilities"]) == {
+        "send.text",
+        "send.image",
+        "chat.get_group_streams",
+        "message.get_by_time_in_chat",
+        "llm.generate",
+        "render.html2png",
+    }
+
+
 def test_config_validation() -> None:
     with pytest.raises(ValueError):
         AnalysisConfig(send_at="25:00")
