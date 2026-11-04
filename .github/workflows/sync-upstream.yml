@@ -21,7 +21,7 @@ jobs:
       - run: pip install -e '.[dev]' maibot-plugin-sdk==2.16.0
       - run: python scripts/sync_upstream.py
       - run: ruff check .
-      - run: pyright --pythonpath python
+      - run: pyright --pythonpath "$(command -v python)"
       - run: pytest -q
       - name: 检查通过后提交允许同步的文件
         run: |

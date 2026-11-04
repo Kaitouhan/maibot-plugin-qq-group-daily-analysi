@@ -22,5 +22,5 @@ jobs:
         run: pip install maibot-plugin-sdk==${{ matrix.sdk }}
       - run: ruff check .
       - run: ruff format --check --exclude vendor .
-      - run: pyright --pythonpath python
+      - run: pyright --pythonpath "$(command -v python)"
       - run: pytest -q
