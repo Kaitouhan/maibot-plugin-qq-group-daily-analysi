@@ -43,6 +43,28 @@
               "max_length": 4000
             }
           }
+        },
+        "files": {
+          "api": "managed_files_query",
+          "parameters": {
+            "partition": {
+              "type": "string",
+              "max_length": 65536
+            },
+            "name": {
+              "type": "string",
+              "max_length": 65536
+            },
+            "search": {
+              "type": "string",
+              "max_length": 65536
+            },
+            "page": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            }
+          }
         }
       },
       "actions": {
@@ -141,6 +163,24 @@
               "max_length": 49152
             }
           }
+        },
+        "files_mutate": {
+          "api": "managed_files_mutate",
+          "parameters": {
+            "partition": {
+              "type": "string",
+              "max_length": 65536
+            },
+            "operation": {
+              "type": "string",
+              "max_length": 65536
+            },
+            "value": {
+              "type": "string",
+              "max_length": 65536
+            }
+          },
+          "confirmation": "确认修改或删除所选文件？此操作会核对文件修订号。"
         }
       },
       "uploads": {

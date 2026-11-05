@@ -22,6 +22,7 @@ from .storage import Store
 from .vendor.upstream.src.application.services.report_query_service import ReportQueryService
 from .vendor.upstream.src.domain.value_objects import AnalysisResultPayload
 from .vendor.upstream.src.infrastructure.logging.plugin_log_buffer import global_log_buffer
+from .vendor.upstream.src.infrastructure.persistence.managed_files import ManagedFiles
 from .vendor.upstream.src.infrastructure.reporting.template_installer import (
     install_template_from_github_url,
     install_template_from_zip,
@@ -83,6 +84,55 @@ class AdminMixin(MaiBotPlugin):
     store: Store | None
     workers: dict[str, asyncio.Task[None]]
     admin_status: dict[str, dict]
+
+    @API("managed_files_query", version="1")
+    async def managed_files_query(self, partition: str = "", name: str = "", search: str = "", page: int = 1) -> dict:
+        store = ManagedFiles(self.engine().plugin_data_dir)
+        if not 1 <= page <= 10000:
+            raise ValueError("页码无效")
+        if not partition:
+            return {"rows": await asyncio.to_thread(store.overview)}
+        if name:
+            content = await asyncio.to_thread(store.read, partition, name)
+            # 原存储验证目录、可下载性和版本；分块通过宿主 JSON 限额。
+            encoded = str(content.get("content_base64", ""))
+            size = 128 * 1024
+            return {
+                "name": name,
+                "revision": content["revision"],
+                "media_type": content["media_type"],
+                "chunk": encoded[(page - 1) * size : page * size],
+                "chunks": max(1, (len(encoded) + size - 1) // size),
+            }
+        rows = await asyncio.to_thread(store.files, partition)
+        selected = [row for row in rows if search.casefold() in row["name"].casefold()]
+        return {"rows": selected[(page - 1) * 30 : page * 30], "total": len(selected)}
+
+    @API("managed_files_mutate", version="1")
+    async def managed_files_mutate(self, partition: str, operation: str, value: str) -> dict:
+        if self.workers:
+            raise ValueError("请等待运行任务结束后修改文件")
+        items = json.loads(value)
+        if not isinstance(items, list) or not 1 <= len(items) <= 200:
+            raise ValueError("请选择1到200个文件")
+        if operation not in {"create", "replace", "rename", "delete"}:
+            raise ValueError("未知操作")
+        store = ManagedFiles(self.engine().plugin_data_dir)
+        results = []
+        # 不在执行期间让出事件循环，避免新分析任务与文件变更交错。
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+                raise ValueError("文件定位字段无效")
+            name = item["name"]
+            try:
+                payload = base64.b64decode(item.get("content_base64", ""), validate=True)
+                store.mutate(
+                    partition, name, operation, str(item.get("revision", "")), payload, str(item.get("new_name", ""))
+                )
+                results.append({"name": name, "success": True})
+            except (ValueError, OSError) as error:
+                results.append({"name": name, "success": False, "error": str(error)})
+        return {"results": results}
 
     @Tool(
         "group_daily_analysis_get_report",

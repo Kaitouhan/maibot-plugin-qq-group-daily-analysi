@@ -6,7 +6,7 @@
 <script type="module">
 const $=id=>document.getElementById(id),format=v=>JSON.stringify(v,null,2);
 let section='overview',page=1,timer=null;
-const labels={overview:'概览与任务',history:'历史日报',templates:'模板与资源',config:'完整配置',traces:'分析链路',logs:'日志',incremental:'增量批次',references:'漫画参考图'};
+const labels={overview:'概览与任务',history:'历史日报',templates:'模板与资源',config:'完整配置',traces:'分析链路',logs:'日志',incremental:'增量批次',references:'漫画参考图',files:'文件管理'};
 function el(tag,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n}
 function message(text,error=false){$('message').textContent=text;$('message').className=error?'error':''}
 async function guard(fn){try{return await fn()}catch(e){message(e.message||String(e),true)}}
@@ -21,6 +21,7 @@ async function preview(job){const first=await query('artifact',{trace_id:job.id,
 async function refresh(){
  $('content').replaceChildren();
  if(section==='config'){const config=await query('config'),c=card('原插件完整配置'),select=el('select'),editor=el('textarea'),hint=el('p');c.append(el('p','选择字段并编辑 JSON 值。字符串需加双引号；星号密钥保留原值。'));for(const [g,s] of Object.entries(config.schema))for(const [k,d] of Object.entries(s.items||{})){const o=el('option',`${g} / ${d.description||k}`);o.value=`${g}.${k}`;select.append(o)}select.onchange=()=>{const [g,k]=select.value.split('.');editor.value=format(config.values[g][k]);hint.textContent=config.schema[g].items[k].hint||''};select.onchange();c.append(select,hint,editor,button('保存字段',()=>operate('save_config',{template:select.value,value:editor.value})));return}
+ if(section==='files'){await filesPage();return}
  const r=await query(section);
  if(section==='overview'){raw(r.metrics,card('运行概览'));table([...(r.jobs||[])].reverse(),(j,td)=>{if(j.artifact)td.append(button('预览',()=>preview(j)));if(['running','queued'].includes(j.status))td.append(button('取消',()=>operate('cancel',{stream_id:j.stream_id})))},card('最近任务'))}
  else if(section==='history'){table(r.rows,(row,td)=>{const pick=()=>{$('group').value=row.stream_id;$('day').value=row.day};td.append(button('查看',async()=>{pick();raw((await query('report')).report,card('日报内容'))}),button('重渲染',async()=>{pick();await operate('rerender')}),button('删除',async()=>{await maibot.action('remove',{operation:'report',stream_id:row.stream_id,day:row.day});await refresh()}))},card('历史日报'))}
@@ -29,6 +30,25 @@ async function refresh(){
  else if(section==='references'){const c=card('漫画角色参考图'),file=el('input'),name=el('input');file.type='file';file.accept='image/png,image/jpeg,image/webp';name.placeholder='角色名称';table(r.rows,null,c);c.append(file,name,button('保存参考图',async()=>{if(!file.files[0])throw Error('请选择图片');const result=await maibot.upload('reference',file.files[0],{label:name.value});message(`${result.message}：${result.path}`);await refresh()}),el('p','将保存后的路径填入完整配置中的漫画角色方案；绘图供应商、角色和分镜提示词也在完整配置中设置。'))}
  else raw(r,card(labels[section]));
  if(['history','traces','logs'].includes(section)){const c=card('翻页');c.append(button('上一页',async()=>{page=Math.max(1,page-1);await refresh()}),el('span',` 第 ${page} 页 `),button('下一页',async()=>{page++;await refresh()}))}
+}
+let filePartition='reports',filePage=1,fileSearch='';
+async function filesPage(){
+ const c=card('文件与资源管理'),select=el('select'),search=el('input'),picked=[];
+ const overview=await maibot.query('files');
+ for(const item of overview.rows){const o=el('option',`${item.name} (${item.count})`);o.value=item.key;select.append(o)}
+ select.value=filePartition;select.onchange=()=>guard(async()=>{filePartition=select.value;filePage=1;await refresh()});
+ search.value=fileSearch;search.placeholder='搜索文件名';
+ c.append(select,search,button('搜索',async()=>{fileSearch=search.value;filePage=1;await refresh()}));
+ const result=await maibot.query('files',{partition:filePartition,search:fileSearch,page:filePage});
+ table(result.rows,(row,td)=>{const check=el('input');check.type='checkbox';check.onchange=()=>{const index=picked.indexOf(row);if(check.checked&&index<0)picked.push(row);else if(index>=0)picked.splice(index,1)};td.append(check,button('查看 / 编辑',async()=>{
+ const part=filePartition,first=await maibot.query('files',{partition:part,name:row.name,page:1});let encoded=first.chunk;
+ for(let i=1;i<first.chunks;i++)encoded+=(await maibot.query('files',{partition:part,name:row.name,page:i+1})).chunk;
+ const bytes=Uint8Array.from(atob(encoded),ch=>ch.charCodeAt(0)),detail=card(row.name);
+ if(row.media_type?.startsWith('image/')&&!row.name.endsWith('.svg')){const img=el('img');img.src=`data:${row.media_type};base64,${encoded}`;detail.append(img)}
+ const editor=el('textarea');editor.value=new TextDecoder().decode(bytes);if(row.editable){detail.append(editor,button('保存修改',async()=>{const data=new TextEncoder().encode(editor.value);if(data.length>36000)throw Error('此编辑器支持36KB以内文件');const value=JSON.stringify([{name:row.name,revision:first.revision,content_base64:btoa(String.fromCharCode(...data))}]);const out=await maibot.action('files_mutate',{partition:part,operation:'replace',value});raw(out,detail)}))}else if(row.media_type?.startsWith('text/'))raw(editor.value,detail);
+ const rename=el('input');rename.value=row.name;detail.append(rename,button('重命名',async()=>{raw(await maibot.action('files_mutate',{partition:part,operation:'rename',value:JSON.stringify([{name:row.name,revision:first.revision,new_name:rename.value}])}),detail)}));
+ }))},c);
+ c.append(button('删除勾选文件',async()=>{if(!picked.length)throw Error('请先勾选文件');const r=await maibot.action('files_mutate',{partition:filePartition,operation:'delete',value:JSON.stringify(picked.map(row=>({name:row.name,revision:row.revision})))});await refresh();raw(r,card('删除结果'))}),button('上一页',async()=>{filePage=Math.max(1,filePage-1);await refresh()}),el('span',`第${filePage}页 / 共${result.total}项`),button('下一页',async()=>{filePage++;await refresh()}));
 }
 for(const [key,label] of Object.entries(labels))$('nav').append(button(label,async()=>{section=key;page=1;for(const node of $('nav').children)node.setAttribute('aria-pressed',String(node.textContent===label));await refresh()}));
 for(const [operation,label] of Object.entries({daily:'生成日报',comic:'生成漫画',incremental:'保存增量批次',final:'增量汇总',rerender:'重渲染日报',probe:'测试渲染'}))$('operations').append(button(label,()=>operate(operation)));

@@ -191,6 +191,22 @@ async def test_admin_upload_order_and_artifact_boundary(tmp_path):
     plugin.runtime = engine
     try:
         await engine.start()
+        reports = tmp_path / "reports"
+        reports.mkdir(exist_ok=True)
+        report_file = reports / "sample.txt"
+        report_file.write_text("report", encoding="utf-8")
+        listing = await plugin.managed_files_query("reports")
+        row = next(item for item in listing["rows"] if item["name"] == "sample.txt")
+        content = await plugin.managed_files_query("reports", name="sample.txt")
+        assert base64.b64decode(content["chunk"]) == b"report"
+        report_file.write_text("updated", encoding="utf-8")
+        denied = await plugin.managed_files_mutate("reports", "delete", json.dumps([row]))
+        assert not denied["results"][0]["success"] and report_file.exists()
+        fresh = await plugin.managed_files_query("reports")
+        deleted = await plugin.managed_files_mutate("reports", "delete", json.dumps(fresh["rows"]))
+        assert deleted["results"][0]["success"] and not report_file.exists()
+        with pytest.raises(ValueError):
+            await plugin.managed_files_query("reports", name="../../private")
         with pytest.raises(ValueError, match="顺序"):
             await plugin.template_chunk("a" * 32, 1, 2, base64.b64encode(b"x").decode())
         with pytest.raises(ValueError, match="序号"):
