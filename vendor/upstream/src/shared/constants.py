@@ -1,0 +1,159 @@
+"""
+常量 - 插件中使用的共享常量
+"""
+
+from __future__ import annotations
+
+import os
+import time
+import uuid
+from enum import Enum
+
+from ..domain.value_objects.task_status import TaskStatus as TaskStatus
+
+# 当前 Python 进程与实例生命周期唯一凭据 (用于区分进程崩溃与热重载)
+PROCESS_PID: int = os.getpid()
+PROCESS_BOOT_ID: str = f"{PROCESS_PID}:{uuid.uuid4().hex[:8]}:{int(time.time())}"
+# 沿用图片生成的整体上限，供服务编排和独立 Typst 入口共同使用。
+IMAGE_RENDER_TOTAL_TIMEOUT_SECONDS = 300
+
+
+class Platform(str, Enum):
+    """
+    支持的聊天平台枚举
+
+    定义了插件适配的所有基础通讯平台标识。
+    """
+
+    ONEBOT = "onebot"
+    AIOCQHTTP = "aiocqhttp"
+    TELEGRAM = "telegram"
+    DISCORD = "discord"
+    SLACK = "slack"
+    SATORI = "satori"
+    QQ_OFFICIAL = "qq_official"
+
+
+class AnalysisStage(str, Enum):
+    """
+    分析与渲染流水线阶段枚举
+
+    定义了全链路追踪、活跃任务打点与 Checkpoint 存储所使用的标准阶段名称。
+    """
+
+    FETCH_MESSAGES = "FETCH_MESSAGES"
+    CLEAN_MESSAGES = "CLEAN_MESSAGES"
+    STATS_ANALYSIS = "STATS_ANALYSIS"
+    LLM_ANALYSIS = "LLM_ANALYSIS"
+    SAVE_SUMMARY = "SAVE_SUMMARY"
+    RENDER_REPORT = "RENDER_REPORT"
+    DISPATCH_REPORT = "DISPATCH_REPORT"
+    CHECKPOINT_RESTORE = "CHECKPOINT_RESTORE"
+    # 按需轻量分析阶段 (LLM Tool 专用快照隔离)
+    ON_DEMAND_ANALYSIS = "ON_DEMAND_ANALYSIS"
+    # 漫画生成扩展阶段
+    COMIC_STORYBOARD = "COMIC_STORYBOARD"
+    COMIC_DRAWING = "COMIC_DRAWING"
+
+
+class ContentType(str, Enum):
+    """
+    统一消息内容类型枚举
+
+    将不同平台（OneBot, Discord 等）的消息片段抽象为统一的类型体系。
+    """
+
+    TEXT = "text"
+    IMAGE = "image"
+    EMOJI = "emoji"
+    STICKER = "sticker"
+    FILE = "file"
+    AUDIO = "audio"
+    VIDEO = "video"
+    REPLY = "reply"
+    AT = "at"
+    UNKNOWN = "unknown"
+
+
+class ReportFormat(str, Enum):
+    """
+    分析报告导出格式枚举
+
+    控制最终呈现给用户的报告呈现形式。
+    """
+
+    TEXT = "text"
+    MARKDOWN = "markdown"
+    IMAGE = "image"
+    HTML = "html"
+
+
+# 插件元数据与仓库配置
+PLUGIN_NAME = "astrbot_plugin_qq_group_daily_analysis"
+GITHUB_REPO_OWNER = "SXP-Simon"
+GITHUB_REPO_NAME = "astrbot_plugin_qq_group_daily_analysis"
+GITHUB_REPO_BRANCH = "main"
+
+# ==========================================
+# 静态资源与 CDN 配置常量
+# ==========================================
+DEFAULT_CDN_HOST = "https://cdn.jsdmirror.com"
+DEFAULT_GITHUB_REPO_CDN = (
+    f"{DEFAULT_CDN_HOST}/gh/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}@{GITHUB_REPO_BRANCH}"
+)
+DEFAULT_ASSETS_CDN_URL = f"{DEFAULT_GITHUB_REPO_CDN}/assets"
+DEFAULT_ATRI_ASSETS_CDN_URL = f"{DEFAULT_ASSETS_CDN_URL}/ATRI"
+DEFAULT_MIKU_ASSETS_CDN_URL = f"{DEFAULT_ASSETS_CDN_URL}/HatsuneMiku"
+DEFAULT_DEEPSEEK_MAID_ASSETS_CDN_URL = f"{DEFAULT_ASSETS_CDN_URL}/deepseek_maid"
+DEFAULT_MARIA_ASSETS_CDN_URL = f"{DEFAULT_ASSETS_CDN_URL}/maria"
+DEFAULT_NPM_CDN_URL = f"{DEFAULT_CDN_HOST}/npm"
+
+# 平台标识符
+SUPPORTED_PLATFORMS = [
+    Platform.ONEBOT.value,
+    Platform.TELEGRAM.value,
+    Platform.DISCORD.value,
+]
+
+# 分析默认值
+DEFAULT_MAX_TOPICS = 5
+DEFAULT_MAX_USER_TITLES = 10
+DEFAULT_MAX_GOLDEN_QUOTES = 5
+DEFAULT_MIN_MESSAGES = 50
+DEFAULT_MAX_TOKENS = 2000
+
+# 时间段
+HOUR_RANGES = {
+    "morning": (6, 12),
+    "afternoon": (12, 18),
+    "evening": (18, 24),
+    "night": (0, 6),
+}
+
+# 错误代码
+ERROR_INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+ERROR_LLM_FAILED = "LLM_FAILED"
+ERROR_PLATFORM_ERROR = "PLATFORM_ERROR"
+ERROR_CONFIG_ERROR = "CONFIG_ERROR"
+ERROR_TIMEOUT = "TIMEOUT"
+
+# 缓存 TTL（秒）
+CACHE_TTL_SHORT = 60  # 1 分钟
+CACHE_TTL_MEDIUM = 300  # 5 分钟
+CACHE_TTL_LONG = 3600  # 1 小时
+CACHE_TTL_DAY = 86400  # 24 小时
+
+# 速率限制默认值
+RATE_LIMIT_LLM_CALLS = 10  # 每分钟调用次数
+RATE_LIMIT_API_CALLS = 60  # 每分钟调用次数
+RATE_LIMIT_BURST = 5  # 突发大小
+
+# 重试默认值
+RETRY_MAX_ATTEMPTS = 3
+RETRY_BASE_DELAY = 1.0
+RETRY_MAX_DELAY = 30.0
+
+# 文件路径
+HISTORY_DIR = "history"
+CACHE_DIR = "cache"
+TEMP_DIR = "temp"

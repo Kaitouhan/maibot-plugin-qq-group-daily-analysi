@@ -1,0 +1,1849 @@
+{% import "inline_assets.html" as inline_assets with context %}
+{# ================= 报告语言（i18n 骨架 · POC，长图版） =================
+   与 html_template.html 同一套约定：core 传入 report_language 才接管，
+   不传时文案仍是简体、lang 仍沿用 t2i_font_source 的地区逻辑 —— 即渲染结果与改造前一致。
+   两份模板的字典要保持同步（后续 core 落地时建议抽到共享文件）。 #}
+{% set _RL = report_language if (report_language is defined and report_language) else '' %}
+{% set REPORT_LANG = _RL or 'zh-Hans' %}
+{% set _EXPLICIT = _RL != '' %}
+{% set _TC_FIRST = (_RL == 'zh-Hant') or (_RL == '' and t2i_font_source != 'Mainland') %}
+{% set T = {
+    'title': {'zh-Hans': '群聊日常分析看板', 'zh-Hant': '群聊日常分析看板', 'en': 'Group Chat Daily Report', 'ja': 'グループチャット日報'},
+    'log': {'zh-Hans': '分析日志', 'zh-Hant': '分析日誌', 'en': 'Analysis Log', 'ja': '分析ログ'},
+    'k_msgs': {'zh-Hans': '今日消息数', 'zh-Hant': '今日訊息數', 'en': 'Messages Today', 'ja': '今日のメッセージ数'},
+    'k_members': {'zh-Hans': '活跃成员数', 'zh-Hant': '活躍成員數', 'en': 'Active Members', 'ja': 'アクティブメンバー数'},
+    'k_emoji': {'zh-Hans': '表情互动', 'zh-Hant': '表情互動', 'en': 'Emoji Reactions', 'ja': '絵文字リアクション'},
+    'k_chars': {'zh-Hans': '今日字数累计', 'zh-Hant': '今日字數累計', 'en': 'Characters Today', 'ja': '今日の累計文字数'},
+    'k_peak': {'zh-Hans': '峰值活跃时间段', 'zh-Hant': '峰值活躍時段', 'en': 'Peak Activity Window', 'ja': 'ピーク時間帯'},
+    's_24h': {'zh-Hans': '24小时活动', 'zh-Hant': '24 小時活動', 'en': '24-Hour Activity', 'ja': '24時間のアクティビティ'},
+    's_topics': {'zh-Hans': '话题总结', 'zh-Hant': '話題總結', 'en': 'Topics', 'ja': 'トピックまとめ'},
+    's_users': {'zh-Hans': '群友画像', 'zh-Hant': '群友畫像', 'en': 'Member Portraits', 'ja': 'メンバープロフィール'},
+    's_bible': {'zh-Hans': '今日圣经', 'zh-Hant': '今日聖經', 'en': 'Quote of the Day', 'ja': '今日の聖書'},
+    's_review': {'zh-Hans': '群聊锐评', 'zh-Hant': '群聊銳評', 'en': 'Chat Review', 'ja': 'グループ辛口レビュー'}
+} %}
+<!DOCTYPE html>
+<html lang="{{ REPORT_LANG if _EXPLICIT else ('zh-CN' if t2i_font_source == 'Mainland' else 'zh-Hant') }}">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=940, initial-scale=1.0">
+    <title>{{ T.title[REPORT_LANG] }} · {{current_date}}</title>
+    {% if t2i_font_mode|default('network') != 'local' %}
+    <link rel="preconnect" href="{{ t2i_google_fonts_mirror }}">
+    <link rel="preconnect" href="{{ t2i_gstatic_mirror }}" crossorigin>
+    <link
+        href="{{ t2i_google_fonts_mirror }}/css2?family=Noto+Sans+TC:wght@400;500;700;800&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Sans+JP:wght@400;700&family=Outfit:wght@400;600;800&family=Share+Tech+Mono{# 英文报告才加载 Inter（拉丁正文字体）：中文/繁体报告一个字节都不多下 #}{% if REPORT_LANG == 'en' %}&family=Inter:wght@400;500;600;700{% endif %}&display=swap"
+        rel="stylesheet">
+    {% endif %}
+    <!-- 默认通过方案 CDN 加载全瀨體的静态标题字形；本地模式由用户显式选择。 -->
+    <!-- 图标已内联为 SVG（11 个），不再依赖 lucide CDN -->
+    <style>
+        @font-face {
+            font-family: 'cjkfonts AllSeto';
+            {% if t2i_font_mode|default('network') == 'local' %}
+            src: local('cjkFonts 全瀨體'), local('cjkFonts');
+            {% else %}
+            src: url('{{ cdn_assets_base }}/HatsuneMiku/cjkFonts-AllSeto-Title-v1.11.woff2') format('woff2');
+            {% endif %}
+            font-style: normal;
+            font-weight: 400;
+            font-display: swap;
+        }
+        :root {
+            --miku-base: #39C5BB;
+            --miku-light: #A7E7E3;
+            --miku-dark: #2A9D95;
+
+            --miku-pink-light: #F8BBD0;
+            --miku-yellow: #fff9c4;
+            --miku-blue: #e0f2f1;
+
+            --bg-page-base: #f0fafa;
+            --text-main: #2c3e50;
+            --text-sub: #7F8C8D;
+            --accent-dark: #2C3E50;
+
+            --radius: 12px;
+            {# 未传语言时 _TC_FIRST 等价于原来的地区判断，输出不变 #}
+            --font-main: {% if _TC_FIRST %}'Noto Sans TC', 'Noto Sans SC'{% else %}'Noto Sans SC', 'Noto Sans TC'{% endif %}, 'Noto Sans CJK TC', 'Source Han Sans TC', sans-serif;
+            --font-title: 'cjkfonts AllSeto', {% if _TC_FIRST %}'Noto Sans TC', 'Noto Sans SC'{% else %}'Noto Sans SC', 'Noto Sans TC'{% endif %}, 'Noto Sans CJK TC', 'Source Han Sans TC', cursive;
+            --font-num: 'Outfit', sans-serif;
+            --font-mono: 'Share Tech Mono', monospace;
+
+            --border-miku-light: rgba(57, 197, 187, 0.15);
+            --border-miku-gradient: linear-gradient(90deg, var(--miku-dark) 0%, var(--miku-base) 100%);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: var(--font-main);
+            color: var(--text-main);
+            background-color: var(--bg-page-base);
+
+            /* 背景图：多层叠加，保证通透和细节 */
+            background-image:
+                linear-gradient(rgba(240, 250, 250, 0.95), rgba(240, 250, 250, 0.95)),
+                linear-gradient(rgba(57, 197, 187, 0.04) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(57, 197, 187, 0.04) 1px, transparent 1px);
+            background-size: initial, 30px 30px, 30px 30px;
+            background-repeat: repeat, repeat, repeat;
+            background-position: center, center, center;
+            background-attachment: fixed;
+
+            padding: 40px 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.92);
+            border-radius: var(--radius);
+            box-shadow: 0 15px 40px rgba(42, 157, 149, 0.1);
+            position: relative;
+            padding: 40px;
+            overflow: hidden;
+            border: 1px solid var(--border-miku-light);
+            z-index: 1;
+            /* 极淡的葱绿波点，消除白底空洞 */
+            background-image: radial-gradient(rgba(57, 197, 187, 0.08) 1.5px, transparent 1.5px);
+            background-size: 24px 24px;
+        }
+
+        /* --- 丰富的背景隐含文字装饰 (极低透明度，不影响阅读) --- */
+        .deco-01 {
+            position: absolute;
+            top: 40px;
+            right: -20px;
+            font-family: var(--font-num);
+            font-size: 16rem;
+            color: var(--miku-base);
+            opacity: 0.04;
+            font-weight: 900;
+            font-style: italic;
+            z-index: -1;
+            pointer-events: none;
+            line-height: 1;
+        }
+
+        .deco-39 {
+            position: absolute;
+            bottom: 200px;
+            left: -40px;
+            font-family: var(--font-num);
+            font-size: 22rem;
+            color: var(--miku-base);
+            opacity: 0.03;
+            font-weight: 900;
+            font-style: italic;
+            z-index: -1;
+            pointer-events: none;
+            line-height: 1;
+        }
+
+        .deco-sys {
+            position: absolute;
+            top: 180px;
+            left: 30px;
+            font-family: var(--font-num);
+            font-size: 1rem;
+            color: var(--miku-dark);
+            opacity: 0.1;
+            letter-spacing: 2px;
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        /* 头部设计 */
+        .header {
+            position: relative;
+            z-index: 1;
+            margin-bottom: 40px;
+            text-align: left;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }
+
+        .header h1 {
+            font-family: var(--font-title);
+            font-size: 2.8rem;
+            color: var(--accent-dark);
+            margin-bottom: 0;
+            position: relative;
+            display: inline-block;
+        }
+
+        .header h1::after {
+            content: "";
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            height: 8px;
+            background: var(--border-miku-gradient);
+            border-radius: 4px;
+            z-index: -1;
+            opacity: 0.6;
+        }
+
+        .date-line {
+            font-family: var(--font-num);
+            color: var(--miku-dark);
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+
+        /* 统计卡片层 */
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 30px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .stat-box {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: var(--radius);
+            padding: 18px;
+            border: 1px solid var(--border-miku-light);
+            box-shadow: 0 4px 12px rgba(57, 197, 187, 0.05);
+            text-align: center;
+            transition: transform 0.3s ease;
+        }
+
+        .stat-box:hover {
+            transform: translateY(-3px);
+        }
+
+        .stat-num {
+            font-family: var(--font-num);
+            font-size: 2.2rem;
+            color: var(--text-main);
+            font-weight: 800;
+        }
+
+        .stat-txt {
+            font-size: 0.85rem;
+            color: var(--text-sub);
+            margin-top: 5px;
+            font-weight: bold;
+        }
+
+        .stat-icon {
+            color: var(--miku-base);
+            width: 18px;
+            height: 18px;
+            margin-bottom: 2px;
+        }
+
+        /* --- 活跃峰值时段块 (核心修改区) --- */
+        .active-peak-block {
+            grid-column: span 12;
+            background: linear-gradient(135deg, var(--miku-base) 0%, var(--miku-light) 100%);
+            color: #fff;
+
+            /* 修改 1: 设定固定高度，防止被图片拉大 */
+            height: 120px;
+            /* 修改 2: 移除垂直 padding，让内容占满高度 */
+            padding: 0 35px;
+
+            border-radius: var(--radius);
+            margin-bottom: 30px;
+
+            /* 修改 3: 使用水平 Flex 布局，文字居左，图片居右 */
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 6px 15px rgba(57, 197, 187, 0.15);
+        }
+
+        /* 底部 MIKU 字母水印，降低层级 */
+        .active-peak-block::after {
+            content: "MIKU";
+            position: absolute;
+            right: 15px;
+            top: 0;
+            bottom: 0;
+            display: flex;
+            align-items: center;
+            font-family: var(--font-mono);
+            font-size: 160px;
+            line-height: 0.73;
+            font-weight: 900;
+            font-style: italic;
+            color: rgba(255, 255, 255, 0.2);
+            z-index: 0;
+            pointer-events: none;
+            letter-spacing: -3px;
+        }
+
+        /* 文本区域样式 */
+        .peak-label {
+            font-size: 1rem;
+            font-weight: bold;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+            position: relative;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .active-peak-block>div:first-child {
+            min-width: 0;
+            flex: 1 1 auto;
+        }
+
+        .peak-time-text {
+            font-family: var(--font-num);
+            font-size: 2.8rem;
+            font-weight: 800;
+            margin-top: 4px;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            letter-spacing: 1px;
+            position: relative;
+            z-index: 2;
+            white-space: nowrap;
+            word-break: keep-all;
+            overflow-wrap: normal;
+        }
+
+        /* 图片容器样式：顶天立地，完全不拉伸 */
+        .peak-image-container {
+            height: 100%;
+            /* 核心：容器高度占满 */
+            width: auto;
+            max-width: 45%;
+            /* 防止图片太宽挤扁文字 */
+            flex: 0 1 150px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            position: relative;
+            z-index: 1;
+            /* 在水印上方，但在文字下方 */
+        }
+
+        .miku-peak-activity-image {
+            height: 100%;
+            /* 核心：图片高度占满容器 */
+            width: 150px;
+            max-width: 100%;
+            /* 核心：保持原比例，不拉伸，完整显示在框内 */
+            background: var(--miku-peak-activity-image) center / auto 100% no-repeat;
+        }
+
+        /* 模块标头公共样式 */
+        .section-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 30px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid rgba(57, 197, 187, 0.1);
+            position: relative;
+        }
+
+        .v-bar {
+            width: 5px;
+            height: 24px;
+            background: var(--miku-base);
+            border-radius: 10px;
+            margin-right: 15px;
+            box-shadow: 0 0 8px rgba(57, 197, 187, 0.3);
+        }
+
+        .section-title-text {
+            font-family: var(--font-main);
+            font-weight: 800;
+            font-size: 1.5rem;
+            color: var(--accent-dark);
+            letter-spacing: 1px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* 全局通用卡片 */
+        .card-common {
+            background: rgba(255, 255, 255, 0.98);
+            border-radius: var(--radius);
+            border: 1px solid var(--border-miku-light);
+            padding: 30px;
+            margin-bottom: 35px;
+            position: relative;
+            z-index: 1;
+            box-shadow: 0 8px 24px rgba(42, 157, 149, 0.04);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .card-common:hover {
+            box-shadow: 0 12px 30px rgba(42, 157, 149, 0.08);
+            transform: translateY(-2px);
+        }
+
+        /* --- 完美对齐的透明马卡龙底部栏 --- */
+        .footer {
+            margin-top: 50px;
+            /* 使用半透明的马卡龙蓝/葱绿作为底色，告别黑色沉闷 */
+            background: rgba(224, 242, 241, 0.65);
+            backdrop-filter: blur(10px);
+            /* 毛玻璃效果 */
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(57, 197, 187, 0.3);
+            border-radius: var(--radius);
+            padding: 20px 30px;
+            position: relative;
+            z-index: 1;
+            box-shadow: 0 8px 20px rgba(57, 197, 187, 0.08);
+        }
+
+        .footer-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px dashed rgba(57, 197, 187, 0.3);
+            padding-bottom: 15px;
+            margin-bottom: 15px;
+        }
+
+        .footer-bottom {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* 字体颜色适配浅色背景 */
+        .footer-repo {
+            display: inline-flex;
+            align-items: center;
+            font-size: 0.95rem;
+            color: var(--text-main);
+            font-weight: bold;
+            line-height: normal;
+        }
+
+        .footer-repo a {
+            color: var(--miku-dark);
+            text-decoration: none;
+            font-family: var(--font-num);
+        }
+
+        .token-data {
+            text-align: right;
+            font-family: var(--font-num);
+            color: var(--text-main);
+            font-size: 0.9rem;
+        }
+
+        .token-sub {
+            font-size: 0.8rem;
+            color: var(--text-sub);
+            margin-left: 10px;
+        }
+
+        .footer-author {
+            font-family: var(--font-main);
+            font-style: italic;
+            color: var(--miku-dark);
+            font-size: 0.95rem;
+            font-weight: bold;
+        }
+
+        .footer-time {
+            font-family: var(--font-num);
+            font-size: 0.9rem;
+            color: var(--text-sub);
+        }
+
+        @media (max-width: 760px) {
+            .active-peak-block {
+                min-height: 112px;
+                height: auto;
+                padding: 20px;
+                align-items: center;
+            }
+
+            .active-peak-block::after {
+                right: -20px;
+                font-size: 104px;
+            }
+
+            .peak-time-text {
+                font-size: clamp(1.55rem, 5.6vw, 2rem);
+                line-height: 1.2;
+            }
+
+            .peak-image-container {
+                flex-basis: 112px;
+                max-width: 28%;
+                padding: 12px 0;
+            }
+
+            .miku-peak-activity-image {
+                width: 112px;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .stats-row {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .footer-top,
+            .footer-bottom {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 10px;
+            }
+
+            .token-data {
+                text-align: left;
+            }
+
+            .active-peak-block {
+                flex-direction: column;
+                height: auto;
+                padding: 18px;
+                align-items: flex-start;
+                gap: 12px;
+            }
+
+            .peak-image-container {
+                align-self: flex-end;
+                flex-basis: auto;
+                max-width: 100%;
+                height: 72px;
+                margin-top: 0;
+                padding: 0;
+            }
+
+            .peak-label {
+                font-size: 0.9rem;
+            }
+
+            .peak-time-text {
+                font-size: clamp(1.35rem, 8vw, 1.7rem);
+                white-space: normal;
+            }
+        }
+
+        /* MOBILE_HTML_OPTIMIZATION_V1_START */
+        /* Mobile-only layout optimization. Content and template variables are unchanged. */
+        @media (max-width: 900px) {
+            *,
+            *::before,
+            *::after {
+                box-sizing: border-box;
+            }
+
+            html,
+            body {
+                width: 100%;
+                max-width: 100%;
+                overflow-x: hidden;
+            }
+
+            body {
+                padding: clamp(10px, 3vw, 18px) clamp(8px, 2.8vw, 14px) !important;
+                background-attachment: scroll !important;
+            }
+
+            img,
+            svg,
+            canvas {
+                max-width: 100%;
+            }
+
+            .container {
+                width: 100% !important;
+                max-width: 100% !important;
+                padding: clamp(16px, 4.2vw, 28px) !important;
+                border-radius: clamp(14px, 4vw, 22px) !important;
+                overflow: hidden !important;
+            }
+
+            .header {
+                gap: clamp(10px, 3vw, 18px) !important;
+                margin-bottom: clamp(24px, 6vw, 36px) !important;
+            }
+
+            .header h1 {
+                font-size: clamp(2rem, 9vw, 3.5rem) !important;
+                line-height: 1.08 !important;
+                letter-spacing: 0.02em !important;
+                overflow-wrap: anywhere;
+            }
+
+            .date-line {
+                font-size: clamp(0.9rem, 3.4vw, 1.05rem) !important;
+            }
+
+            .stats-row {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+                gap: clamp(8px, 2.8vw, 14px) !important;
+                margin-bottom: clamp(18px, 5vw, 28px) !important;
+            }
+
+            .stat-box {
+                min-width: 0 !important;
+                padding: clamp(12px, 3.5vw, 16px) clamp(8px, 2.8vw, 14px) !important;
+            }
+
+            .stat-num {
+                font-size: clamp(1.45rem, 7vw, 2rem) !important;
+                line-height: 1.12 !important;
+                overflow-wrap: anywhere;
+            }
+
+            .stat-txt {
+                font-size: clamp(0.75rem, 3vw, 0.92rem) !important;
+                line-height: 1.25 !important;
+            }
+
+            .section-header {
+                margin-bottom: clamp(16px, 4vw, 24px) !important;
+                padding-bottom: clamp(8px, 2.6vw, 12px) !important;
+                min-width: 0 !important;
+            }
+
+            .section-title-text {
+                min-width: 0 !important;
+                font-size: clamp(1.15rem, 5vw, 1.45rem) !important;
+                line-height: 1.25 !important;
+                gap: clamp(6px, 2vw, 10px) !important;
+                overflow-wrap: anywhere;
+            }
+
+            .card-common {
+                padding: clamp(16px, 4.4vw, 24px) !important;
+                margin-bottom: clamp(18px, 5vw, 28px) !important;
+                border-radius: clamp(14px, 4vw, 22px) !important;
+                transform: none !important;
+            }
+
+            .card-common,
+            .miku-topic-card,
+            .miku-user-title-card,
+            .miku-chat-quality,
+            .miku-quote-wrap,
+            .miku-quality-summary,
+            .footer,
+            .footer-repo,
+            .token-data {
+                min-width: 0 !important;
+                max-width: 100% !important;
+            }
+
+            .card-common *,
+            .miku-topic-card *,
+            .miku-user-title-card *,
+            .miku-chat-quality *,
+            .miku-quote-wrap *,
+            .footer * {
+                min-width: 0;
+            }
+
+            .card-common,
+            .miku-topic-card,
+            .miku-user-title-card,
+            .miku-chat-quality,
+            .miku-quote-wrap,
+            .section-title-text,
+            .footer-repo a,
+            .token-data {
+                overflow-wrap: anywhere;
+                word-break: break-word;
+            }
+
+            .miku-user-title-grid,
+            .miku-quality-grid {
+                grid-template-columns: 1fr !important;
+                gap: clamp(12px, 3.5vw, 18px) !important;
+            }
+
+            .miku-topic-card {
+                gap: clamp(10px, 3vw, 14px) !important;
+                padding: clamp(16px, 4vw, 22px) !important;
+            }
+
+            .miku-topic-card div[style*="inline-flex"] {
+                max-width: 100% !important;
+                flex-wrap: wrap !important;
+            }
+
+            .miku-quote-row {
+                align-items: stretch !important;
+            }
+
+            .miku-quote-wrap {
+                max-width: 100% !important;
+            }
+
+            .miku-chat-quality-head,
+            .miku-quality-summary {
+                align-items: flex-start !important;
+                gap: clamp(10px, 3vw, 14px) !important;
+            }
+
+            .miku-activity-chart {
+                width: 100% !important;
+                max-width: 100% !important;
+                gap: clamp(6px, 2vw, 10px) !important;
+                overflow: hidden !important;
+            }
+
+            .miku-activity-chart > div {
+                min-width: 0 !important;
+                gap: 1px !important;
+            }
+
+            .miku-activity-chart > div:first-child {
+                height: clamp(118px, 34vw, 160px) !important;
+            }
+
+            .miku-activity-chart span {
+                font-size: clamp(0.48rem, 1.9vw, 0.68rem) !important;
+                line-height: 1.05 !important;
+            }
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 8px !important;
+            }
+
+            .container {
+                padding: clamp(14px, 4vw, 20px) !important;
+                border-radius: 16px !important;
+            }
+
+            .header {
+                flex-direction: column !important;
+                align-items: flex-start !important;
+            }
+
+            .stats-row {
+                grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+            }
+
+            .active-peak-block {
+                flex-direction: row !important;
+                align-items: center !important;
+                justify-content: space-between !important;
+                height: clamp(92px, 27vw, 118px) !important;
+                min-height: 0 !important;
+                padding: 0 clamp(12px, 4vw, 24px) !important;
+                gap: clamp(8px, 3vw, 14px) !important;
+                overflow: hidden !important;
+            }
+
+            .active-peak-block > div:first-child {
+                min-width: 0 !important;
+                flex: 1 1 auto !important;
+                position: relative;
+                z-index: 2;
+            }
+
+            .active-peak-block::after {
+                right: clamp(48px, 18vw, 96px) !important;
+                font-size: clamp(70px, 24vw, 112px) !important;
+                opacity: 0.14 !important;
+            }
+
+            .peak-label {
+                font-size: clamp(0.78rem, 3.2vw, 0.95rem) !important;
+                line-height: 1.2 !important;
+                white-space: normal !important;
+            }
+
+            .peak-time-text {
+                font-size: clamp(1.25rem, 6.4vw, 1.75rem) !important;
+                line-height: 1.12 !important;
+                white-space: normal !important;
+                overflow-wrap: anywhere;
+            }
+
+            .peak-image-container {
+                align-self: stretch !important;
+                height: 100% !important;
+                flex: 0 0 clamp(74px, 27vw, 132px) !important;
+                width: clamp(74px, 27vw, 132px) !important;
+                max-width: 42% !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                display: flex !important;
+                align-items: stretch !important;
+                justify-content: flex-end !important;
+            }
+
+            .miku-peak-activity-image {
+                height: 100% !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                background: var(--miku-peak-activity-image) center / auto 100% no-repeat !important;
+                border: 0 !important;
+                border-radius: 0 !important;
+                box-shadow: none !important;
+            }
+
+            .miku-topic-card {
+                flex-direction: column !important;
+            }
+
+            .miku-user-title-head,
+            .miku-quote-wrap {
+                gap: clamp(8px, 2.8vw, 12px) !important;
+            }
+
+            .miku-user-title-tags {
+                flex-wrap: wrap !important;
+            }
+
+            .miku-user-title-tags span {
+                white-space: normal !important;
+            }
+
+            .footer-top,
+            .footer-bottom {
+                flex-direction: column !important;
+                align-items: flex-start !important;
+                gap: 10px !important;
+            }
+
+            .token-data {
+                text-align: left !important;
+            }
+        }
+
+        @media (max-width: 380px) {
+            .stats-row {
+                grid-template-columns: 1fr !important;
+            }
+
+            .active-peak-block {
+                height: clamp(88px, 30vw, 108px) !important;
+                padding-left: 10px !important;
+                padding-right: 10px !important;
+            }
+
+            .peak-image-container {
+                flex-basis: clamp(66px, 25vw, 96px) !important;
+                width: clamp(66px, 25vw, 96px) !important;
+            }
+        }
+        /* MOBILE_HTML_OPTIMIZATION_V1_END */
+
+
+        /* MOBILE_COMPACT_COMPONENTS_V2_START */
+        /* Compact mobile component sizing. This only changes presentation density. */
+        @media (max-width: 900px) {
+            .container > div[style*="margin-bottom: 50px"],
+            .container > div[style*="margin-bottom:50px"] {
+                margin-bottom: clamp(22px, 6vw, 34px) !important;
+            }
+
+            .section-header {
+                margin-bottom: clamp(12px, 3.5vw, 18px) !important;
+            }
+
+            .card-common {
+                padding: clamp(12px, 3.4vw, 16px) !important;
+                margin-bottom: clamp(12px, 3.6vw, 18px) !important;
+                border-radius: clamp(12px, 3.4vw, 16px) !important;
+            }
+
+            .miku-topic-card {
+                padding: clamp(12px, 3.4vw, 16px) !important;
+                gap: clamp(8px, 2.8vw, 12px) !important;
+                margin-bottom: clamp(12px, 3.6vw, 16px) !important;
+                border-left-width: 4px !important;
+            }
+
+            .miku-topic-card > div:first-child {
+                font-size: clamp(1.1rem, 4.4vw, 1.35rem) !important;
+                line-height: 1.15 !important;
+                padding-top: 0 !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:first-child {
+                font-size: clamp(1rem, 3.8vw, 1.12rem) !important;
+                line-height: 1.32 !important;
+                margin-bottom: 8px !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:nth-child(2) {
+                padding: clamp(8px, 2.6vw, 10px) !important;
+                border-radius: 8px !important;
+                font-size: clamp(0.86rem, 3.2vw, 0.95rem) !important;
+                line-height: 1.55 !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:nth-child(3) {
+                margin-top: clamp(10px, 3vw, 14px) !important;
+                gap: clamp(8px, 2.5vw, 10px) !important;
+            }
+
+            .miku-topic-card div[style*="inline-flex"] {
+                padding: 5px 10px !important;
+                gap: 5px !important;
+                font-size: clamp(0.74rem, 2.8vw, 0.82rem) !important;
+                border-radius: 14px !important;
+            }
+
+            .miku-topic-card div[style*="inline-flex"] svg {
+                width: 13px !important;
+                height: 13px !important;
+            }
+
+            .miku-topic-card div[style*="height: 65px"] {
+                height: clamp(38px, 12vw, 52px) !important;
+            }
+
+            .miku-topic-card img[alt="装饰图"] {
+                max-width: clamp(76px, 24vw, 112px) !important;
+                height: 100% !important;
+                object-fit: contain !important;
+            }
+
+            .miku-user-title-grid {
+                gap: clamp(10px, 3vw, 14px) !important;
+            }
+
+            .miku-user-title-card {
+                padding: clamp(12px, 3.4vw, 16px) !important;
+                gap: clamp(8px, 2.8vw, 12px) !important;
+                border-top-width: 3px !important;
+            }
+
+            .miku-user-title-head {
+                gap: clamp(8px, 2.8vw, 12px) !important;
+            }
+
+            .miku-user-title-head > div:first-child {
+                width: clamp(42px, 13vw, 52px) !important;
+                height: clamp(42px, 13vw, 52px) !important;
+                border-width: 2px !important;
+            }
+
+            .miku-user-title-head > div:nth-child(2) > div:first-child {
+                font-size: clamp(0.95rem, 3.6vw, 1.05rem) !important;
+                line-height: 1.22 !important;
+            }
+
+            .miku-user-title-tags {
+                gap: 4px !important;
+                margin-top: 4px !important;
+            }
+
+            .miku-user-title-tags span {
+                font-size: clamp(0.62rem, 2.5vw, 0.7rem) !important;
+                padding: 2px 6px !important;
+                border-radius: 5px !important;
+            }
+
+            .miku-user-title-card > div:nth-child(2) {
+                padding: clamp(9px, 2.8vw, 12px) !important;
+                border-radius: 9px !important;
+                font-size: clamp(0.82rem, 3.1vw, 0.9rem) !important;
+                line-height: 1.48 !important;
+            }
+
+            .miku-quote-row {
+                margin-bottom: clamp(12px, 3.6vw, 18px) !important;
+            }
+
+            .miku-quote-wrap {
+                gap: clamp(8px, 2.8vw, 12px) !important;
+                max-width: 100% !important;
+            }
+
+            .miku-quote-wrap > div:first-child {
+                width: clamp(36px, 11vw, 44px) !important;
+                height: clamp(36px, 11vw, 44px) !important;
+                border-width: 2px !important;
+            }
+
+            .miku-quote-body > div:first-child {
+                font-size: clamp(0.76rem, 2.8vw, 0.84rem) !important;
+                margin-bottom: 4px !important;
+            }
+
+            .miku-quote-body > div:nth-child(2) {
+                padding: clamp(10px, 3vw, 14px) clamp(12px, 3.5vw, 16px) !important;
+                margin-bottom: 8px !important;
+                border-radius: 12px !important;
+            }
+
+            .miku-quote-body > div:nth-child(2) > div {
+                font-size: clamp(0.9rem, 3.3vw, 1rem) !important;
+                line-height: 1.45 !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) {
+                padding: clamp(8px, 2.8vw, 12px) clamp(10px, 3.2vw, 14px) !important;
+                border-radius: 10px !important;
+                border-left-width: 3px !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) > div:first-child {
+                gap: 6px !important;
+                margin-bottom: 4px !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) svg {
+                width: 15px !important;
+                height: 15px !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) span {
+                font-size: clamp(0.82rem, 3vw, 0.9rem) !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) > div:last-child {
+                font-size: clamp(0.8rem, 3vw, 0.88rem) !important;
+                line-height: 1.45 !important;
+            }
+
+            .miku-chat-quality {
+                padding: clamp(12px, 3.5vw, 16px) !important;
+            }
+
+            .miku-chat-quality-head {
+                margin-bottom: clamp(12px, 3.4vw, 16px) !important;
+                padding-bottom: clamp(8px, 2.8vw, 10px) !important;
+            }
+
+            .miku-chat-quality-head > div:first-child {
+                font-size: clamp(1.15rem, 4.8vw, 1.35rem) !important;
+                line-height: 1.2 !important;
+            }
+
+            .miku-chat-quality-head > div:nth-child(2) {
+                font-size: clamp(0.72rem, 2.8vw, 0.82rem) !important;
+                padding: 3px 9px !important;
+            }
+
+            .miku-chat-quality > div:nth-child(2) {
+                height: 9px !important;
+                margin-bottom: clamp(14px, 3.8vw, 18px) !important;
+            }
+
+            .miku-quality-grid {
+                gap: clamp(8px, 2.8vw, 12px) !important;
+                margin-bottom: clamp(14px, 4vw, 18px) !important;
+            }
+
+            .miku-quality-grid > div {
+                padding: clamp(8px, 2.8vw, 11px) clamp(9px, 3vw, 12px) !important;
+                border-radius: 9px !important;
+                gap: 8px !important;
+            }
+
+            .miku-quality-grid > div > div:first-child {
+                width: 8px !important;
+                height: 8px !important;
+                margin-top: 4px !important;
+            }
+
+            .miku-quality-grid > div > div:nth-child(2) > div:first-child {
+                font-size: clamp(0.78rem, 3vw, 0.88rem) !important;
+                margin-bottom: 3px !important;
+            }
+
+            .miku-quality-grid > div > div:nth-child(2) > div:nth-child(2) {
+                font-size: clamp(0.75rem, 2.8vw, 0.84rem) !important;
+                line-height: 1.42 !important;
+            }
+
+            .miku-quality-summary {
+                padding: clamp(12px, 3.6vw, 16px) !important;
+                border-radius: 10px !important;
+                gap: clamp(8px, 3vw, 12px) !important;
+            }
+
+            .miku-quality-summary > div:first-child > div:first-child {
+                margin-bottom: 8px !important;
+            }
+
+            .miku-quality-summary svg {
+                width: 16px !important;
+                height: 16px !important;
+            }
+
+            .miku-quality-summary span {
+                font-size: clamp(0.9rem, 3.4vw, 1rem) !important;
+            }
+
+            .miku-quality-summary > div:first-child > div:nth-child(2) {
+                font-size: clamp(0.84rem, 3.1vw, 0.92rem) !important;
+                line-height: 1.48 !important;
+            }
+
+            .miku-quality-deco {
+                height: clamp(50px, 16vw, 72px) !important;
+                margin-left: clamp(8px, 3vw, 14px) !important;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .card-common {
+                padding: 12px !important;
+                margin-bottom: 12px !important;
+            }
+
+            .miku-topic-card {
+                padding: 12px !important;
+                gap: 8px !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:nth-child(3) {
+                align-items: flex-end !important;
+            }
+
+            .miku-topic-card div[style*="height: 65px"] {
+                height: clamp(34px, 11vw, 46px) !important;
+            }
+
+            .miku-topic-card img[alt="装饰图"] {
+                max-width: clamp(68px, 22vw, 96px) !important;
+            }
+
+            .miku-user-title-card,
+            .miku-chat-quality {
+                padding: 12px !important;
+            }
+
+            .miku-quality-summary {
+                flex-direction: row !important;
+                align-items: flex-end !important;
+            }
+
+            .miku-quality-deco {
+                flex: 0 0 auto !important;
+                align-self: flex-end !important;
+                height: clamp(42px, 14vw, 60px) !important;
+            }
+        }
+        /* MOBILE_COMPACT_COMPONENTS_V2_END */
+
+
+        /* MOBILE_HOUR_UNIT_HIDE_V1_START */
+        @media (max-width: 600px) {
+            .miku-hour-unit {
+                display: none !important;
+            }
+        }
+        /* MOBILE_HOUR_UNIT_HIDE_V1_END */
+
+
+        /* MOBILE_TOPIC_PROFILE_DENSE_V3_START */
+        /* Extra dense mobile tuning for topics and user profiles. ACGTI role artwork remains visible. */
+        @media (max-width: 900px) {
+            .miku-topic-card {
+                padding: clamp(10px, 3vw, 14px) !important;
+                gap: clamp(7px, 2.4vw, 10px) !important;
+                margin-bottom: clamp(9px, 2.8vw, 13px) !important;
+            }
+
+            .miku-topic-card > div:first-child {
+                font-size: clamp(1rem, 4vw, 1.22rem) !important;
+                line-height: 1.1 !important;
+                opacity: 0.72 !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:first-child {
+                font-size: clamp(0.94rem, 3.5vw, 1.04rem) !important;
+                line-height: 1.25 !important;
+                margin-bottom: 6px !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:nth-child(2) {
+                padding: 7px 9px !important;
+                font-size: clamp(0.8rem, 2.95vw, 0.88rem) !important;
+                line-height: 1.42 !important;
+                border-radius: 7px !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:nth-child(3) {
+                margin-top: 8px !important;
+                gap: 7px !important;
+            }
+
+            .miku-topic-card div[style*="inline-flex"] {
+                padding: 4px 8px !important;
+                gap: 4px !important;
+                font-size: clamp(0.68rem, 2.5vw, 0.76rem) !important;
+                border-radius: 12px !important;
+            }
+
+            .miku-topic-card div[style*="inline-flex"] svg {
+                width: 12px !important;
+                height: 12px !important;
+            }
+
+            .miku-topic-card div[style*="height: 65px"] {
+                height: clamp(30px, 9.5vw, 42px) !important;
+                opacity: 0.92 !important;
+            }
+
+            .miku-topic-card img[alt="装饰图"] {
+                max-width: clamp(58px, 19vw, 86px) !important;
+                height: 100% !important;
+                object-fit: contain !important;
+            }
+
+            .miku-user-title-grid {
+                gap: clamp(8px, 2.6vw, 12px) !important;
+            }
+
+            .miku-user-title-card {
+                padding: clamp(10px, 3vw, 14px) !important;
+                gap: clamp(7px, 2.4vw, 10px) !important;
+                border-top-width: 3px !important;
+                overflow: hidden !important;
+            }
+
+            .miku-user-title-head {
+                gap: clamp(7px, 2.4vw, 10px) !important;
+            }
+
+            .miku-user-title-head > div:first-child {
+                width: clamp(36px, 11.5vw, 46px) !important;
+                height: clamp(36px, 11.5vw, 46px) !important;
+                border-width: 2px !important;
+                box-shadow: 0 2px 7px rgba(57,197,187,0.16) !important;
+            }
+
+            .miku-user-title-head > div:nth-child(2) > div:first-child {
+                font-size: clamp(0.88rem, 3.25vw, 0.98rem) !important;
+                line-height: 1.16 !important;
+            }
+
+            .miku-user-title-tags {
+                gap: 3px !important;
+                margin-top: 3px !important;
+            }
+
+            .miku-user-title-tags span {
+                font-size: clamp(0.58rem, 2.25vw, 0.66rem) !important;
+                padding: 1px 5px !important;
+                border-radius: 5px !important;
+                line-height: 1.35 !important;
+            }
+
+            .miku-user-title-card > div:nth-child(2) {
+                padding: 7px 9px !important;
+                border-radius: 8px !important;
+                font-size: clamp(0.76rem, 2.85vw, 0.84rem) !important;
+                line-height: 1.38 !important;
+                min-height: 0 !important;
+            }
+
+            .miku-user-title-card > div:nth-child(2) svg {
+                width: 12px !important;
+                height: 12px !important;
+                right: 6px !important;
+                bottom: 6px !important;
+            }
+
+            .miku-user-title-card > img[alt=""] {
+                width: clamp(30%, 34vw, 38%) !important;
+                max-height: 74% !important;
+                right: 6px !important;
+                bottom: 6px !important;
+                object-fit: contain !important;
+                pointer-events: none !important;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .miku-topic-card {
+                padding: 9px 10px !important;
+                gap: 6px !important;
+                border-left-width: 3px !important;
+            }
+
+            .miku-topic-card > div:first-child {
+                font-size: clamp(0.95rem, 3.8vw, 1.08rem) !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:first-child {
+                font-size: clamp(0.9rem, 3.35vw, 0.98rem) !important;
+                margin-bottom: 5px !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:nth-child(2) {
+                padding: 6px 8px !important;
+                font-size: clamp(0.76rem, 2.8vw, 0.84rem) !important;
+                line-height: 1.36 !important;
+            }
+
+            .miku-topic-card > div:nth-child(2) > div:nth-child(3) {
+                margin-top: 7px !important;
+                gap: 6px !important;
+            }
+
+            .miku-topic-card div[style*="height: 65px"] {
+                height: clamp(26px, 8.5vw, 36px) !important;
+            }
+
+            .miku-topic-card img[alt="装饰图"] {
+                max-width: clamp(50px, 17vw, 74px) !important;
+            }
+
+            .miku-user-title-grid {
+                gap: 8px !important;
+            }
+
+            .miku-user-title-card {
+                padding: 9px 10px !important;
+                gap: 6px !important;
+            }
+
+            .miku-user-title-head > div:first-child {
+                width: clamp(34px, 10.5vw, 42px) !important;
+                height: clamp(34px, 10.5vw, 42px) !important;
+            }
+
+            .miku-user-title-card > div:nth-child(2) {
+                padding: 6px 8px !important;
+                font-size: clamp(0.74rem, 2.75vw, 0.82rem) !important;
+                line-height: 1.34 !important;
+            }
+
+            .miku-user-title-card > img[alt=""] {
+                width: clamp(30%, 33vw, 36%) !important;
+                max-height: 70% !important;
+            }
+        }
+
+        @media (max-width: 380px) {
+            .miku-topic-card {
+                padding: 8px !important;
+            }
+
+            .miku-topic-card div[style*="height: 65px"] {
+                height: 24px !important;
+            }
+
+            .miku-topic-card img[alt="装饰图"] {
+                max-width: 56px !important;
+            }
+
+            .miku-user-title-card {
+                padding: 8px !important;
+            }
+
+            .miku-user-title-head > div:first-child {
+                width: 32px !important;
+                height: 32px !important;
+            }
+
+            .miku-user-title-card > img[alt=""] {
+                width: 32% !important;
+                max-height: 66% !important;
+            }
+        }
+        /* MOBILE_TOPIC_PROFILE_DENSE_V3_END */
+
+
+        /* MOBILE_QUOTE_DENSE_V4_START */
+        /* Extra dense mobile tuning for the daily quote section. */
+        @media (max-width: 900px) {
+            .miku-quote-row {
+                margin-bottom: clamp(9px, 2.8vw, 13px) !important;
+            }
+
+            .miku-quote-wrap {
+                gap: clamp(6px, 2.2vw, 9px) !important;
+                max-width: 100% !important;
+            }
+
+            .miku-quote-wrap > div:first-child {
+                width: clamp(30px, 9.5vw, 38px) !important;
+                height: clamp(30px, 9.5vw, 38px) !important;
+                border-width: 2px !important;
+                box-shadow: 0 0 0 1px var(--miku-light) !important;
+            }
+
+            .miku-quote-body > div:first-child {
+                font-size: clamp(0.68rem, 2.5vw, 0.78rem) !important;
+                line-height: 1.15 !important;
+                margin-bottom: 3px !important;
+            }
+
+            .miku-quote-body > div:nth-child(2) {
+                padding: 8px 10px !important;
+                margin-bottom: 6px !important;
+                border-radius: 10px !important;
+                box-shadow: 0 2px 6px rgba(57,197,187,0.04) !important;
+            }
+
+            .miku-quote-body > div:nth-child(2) > div {
+                font-size: clamp(0.82rem, 3vw, 0.92rem) !important;
+                line-height: 1.34 !important;
+                font-weight: 600 !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) {
+                padding: 7px 9px !important;
+                border-radius: 8px !important;
+                border-left-width: 3px !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) > div:first-child {
+                gap: 5px !important;
+                margin-bottom: 3px !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) svg {
+                width: 13px !important;
+                height: 13px !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) span {
+                font-size: clamp(0.74rem, 2.7vw, 0.82rem) !important;
+                line-height: 1.15 !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) > div:last-child {
+                font-size: clamp(0.72rem, 2.65vw, 0.8rem) !important;
+                line-height: 1.34 !important;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .miku-quote-row {
+                margin-bottom: 9px !important;
+            }
+
+            .miku-quote-wrap {
+                gap: 6px !important;
+            }
+
+            .miku-quote-wrap > div:first-child {
+                width: clamp(28px, 8.8vw, 34px) !important;
+                height: clamp(28px, 8.8vw, 34px) !important;
+            }
+
+            .miku-quote-body > div:nth-child(2) {
+                padding: 7px 9px !important;
+                margin-bottom: 5px !important;
+            }
+
+            .miku-quote-body > div:nth-child(2) > div {
+                font-size: clamp(0.78rem, 2.85vw, 0.88rem) !important;
+                line-height: 1.3 !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) {
+                padding: 6px 8px !important;
+            }
+
+            .miku-quote-body > div:nth-child(3) > div:last-child {
+                font-size: clamp(0.7rem, 2.55vw, 0.78rem) !important;
+                line-height: 1.3 !important;
+            }
+        }
+
+        @media (max-width: 380px) {
+            .miku-quote-row {
+                margin-bottom: 8px !important;
+            }
+
+            .miku-quote-wrap > div:first-child {
+                width: 26px !important;
+                height: 26px !important;
+            }
+
+            .miku-quote-body > div:nth-child(2),
+            .miku-quote-body > div:nth-child(3) {
+                padding: 6px 7px !important;
+            }
+        }
+        /* MOBILE_QUOTE_DENSE_V4_END */
+
+        /* 按语言分组渲染：日文/韩文片段走各自字体，避免中日文共用码位导致的字形互撞
+           （lang 标记由文末脚本在渲染时打上；纯中文内容命中 0 处，像素不受影响，
+           字体缺失时回落到本地区的 --font-main 栈） */
+        :lang(ja) { font-family: 'Noto Sans JP', var(--font-main) !important; }
+
+        /* ---------- 11c. 日文报告的排版（页面 lang=ja 时才命中） ----------
+           日文和中文共用同一批汉字码位，靠字体才能分开字形：
+           · 标题原本走 'cjkfonts AllSeto'（中文展示字体，假名覆盖不全）→ 日文报告改走 Noto Sans JP；
+           · 正文原本是中文字体栈 → 日文报告改成日文字体栈（本机/容器都装了 Noto Sans JP，不会出豆腐块）；
+           · 数字仍由 --font-num（Outfit）出，不受影响；
+           · 上面的 :lang(ja) 单条规则是给"中文/英文报告里的日文片段"换字体的，保持原样不动；
+           · 日文全角字宽和中文字号体系一致，行高/字距沿用原值即可，不做英文那种负字距。 */
+        :lang(ja) {
+            --font-main: 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', 'Meiryo', 'Noto Sans SC', 'Noto Sans TC', sans-serif;
+            --font-title: 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', 'Noto Sans SC', 'Noto Sans TC', sans-serif;
+        }
+
+        /* ---------- 11b. 英文报告的针对性排版（只在 REPORT_LANG=en 时命中，中文/繁体版一行不动） ----------
+           ① 拉丁字母不再交给中文字体渲染：标题用 Outfit（模板自己的拉丁展示字形）、正文用 Inter，
+              中文引用（金句原文 / 昵称 / 群名）仍由后面的 CJK 字体兜底，不会变豆腐块；
+           ② 字距：原来的 +1px 是给方块字调的，拉丁字母要轻微负字距才不散；
+           ③ 小标签（统计卡 / 峰值时段）走英文报表惯例的大写 + 字距，信息量不变、视觉更齐整；
+           ④ 行高：原 1.8 是给中文调的，拉丁字母 1.62 更耐读（partial 里是内联样式，只能 !important 覆盖）。 */
+        :lang(en) {
+            --font-main: 'Inter', 'Outfit', {% if _TC_FIRST %}'Noto Sans TC', 'Noto Sans SC'{% else %}'Noto Sans SC', 'Noto Sans TC'{% endif %}, sans-serif;
+            --font-title: 'Outfit', 'Inter', {% if _TC_FIRST %}'Noto Sans TC', 'Noto Sans SC'{% else %}'Noto Sans SC', 'Noto Sans TC'{% endif %}, sans-serif;
+        }
+        :lang(en) h1 { font-weight: 800; letter-spacing: -0.018em; }
+        :lang(en) .section-title-text { letter-spacing: -0.011em !important; }
+        :lang(en) .stat-txt,
+        :lang(en) .peak-label { text-transform: uppercase; letter-spacing: 0.045em; }
+        :lang(en) .miku-topic-card [style*="line-height"],
+        :lang(en) .miku-quality-summary { line-height: 1.62 !important; }
+
+</style>
+{{ inline_assets.peak_activity_image_css() | safe }}
+</head>
+
+<body>
+    <div class="container">
+        <div class="deco-01">01</div>
+        <div class="deco-39">39</div>
+        <div class="deco-sys">[ SYSTEM_VOCALOID_INITIALIZED ]<br>HATSUNE MIKU v4X</div>
+
+        <div class="header">
+            <h1>{{ T.title[REPORT_LANG] }}</h1>
+            <div class="date-line">{{ T.log[REPORT_LANG] }} // {{current_date}}</div>
+        </div>
+
+        <div class="stats-row">
+            <div class="stat-box">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 5px;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="message-square" aria-hidden="true" class="lucide lucide-message-square stat-icon"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"></path></svg>
+                    <div class="stat-txt" style="margin: 0;">{{ T.k_msgs[REPORT_LANG] }}</div>
+                </div>
+                <div class="stat-num">{{message_count}}</div>
+            </div>
+            <div class="stat-box">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 5px;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="users" aria-hidden="true" class="lucide lucide-users stat-icon"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><path d="M16 3.128a4 4 0 0 1 0 7.744"></path><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><circle cx="9" cy="7" r="4"></circle></svg>
+                    <div class="stat-txt" style="margin: 0;">{{ T.k_members[REPORT_LANG] }}</div>
+                </div>
+                <div class="stat-num">{{participant_count}}</div>
+            </div>
+            <div class="stat-box">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 5px;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="smile" aria-hidden="true" class="lucide lucide-smile stat-icon"><path d="M15 10V9"></path><path d="M16.472 15a6 6 0 01-8.943 0"></path><path d="M9 10V9"></path><circle cx="12" cy="12" r="10"></circle></svg>
+                    <div class="stat-txt" style="margin: 0;">{{ T.k_emoji[REPORT_LANG] }}</div>
+                </div>
+                <div class="stat-num">{{emoji_count}}</div>
+            </div>
+            <div class="stat-box">
+                <div style="display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 5px;">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="type" aria-hidden="true" class="lucide lucide-type stat-icon"><path d="M12 4v16"></path><path d="M4 7V5a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v2"></path><path d="M9 20h6"></path></svg>
+                    <div class="stat-txt" style="margin: 0;">{{ T.k_chars[REPORT_LANG] }}</div>
+                </div>
+                <div class="stat-num">{{total_characters}}</div>
+            </div>
+        </div>
+
+        <div class="active-peak-block">
+            <div>
+                <div class="peak-label">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="trending-up" aria-hidden="true" class="lucide lucide-trending-up" style="width: 20px; height: 20px;"><path d="M16 7h6v6"></path><path d="m22 7-8.5 8.5-5-5L2 17"></path></svg>
+                    {{ T.k_peak[REPORT_LANG] }}
+                </div>
+                <div class="peak-time-text">{{most_active_period}}</div>
+            </div>
+
+            <div class="peak-image-container">
+                <div class="miku-peak-activity-image" role="img" aria-label="Peak Activity Visualization"></div>
+            </div>
+        </div>
+
+        <!-- Activity Trend Section -->
+        {% if hourly_chart_html %}
+        <div style="margin-bottom: 50px;">
+            <div class="section-header">
+                <div class="v-bar"></div>
+                <div class="section-title-text">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="line-chart" aria-hidden="true" class="lucide lucide-line-chart" style="width: 24px; height: 24px; color: var(--miku-dark);"><path d="M3 3v16a2 2 0 0 0 2 2h16"></path><path d="m19 9-5 5-4-4-3 3"></path></svg>
+                    {{ T.s_24h[REPORT_LANG] }}
+                </div>
+            </div>
+            <div class="card-common" style="padding: 20px 10px;">
+                {{hourly_chart_html | safe}}
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Topic Details Section -->
+        {% if topics_html %}
+        <div style="margin-bottom: 50px;">
+            <div class="section-header">
+                <div class="v-bar" style="background: var(--miku-pink-light);"></div>
+                <div class="section-title-text">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="message-square" aria-hidden="true" class="lucide lucide-message-square" style="width: 24px; height: 24px; color: var(--miku-dark);"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"></path></svg>
+                    {{ T.s_topics[REPORT_LANG] }}
+                </div>
+            </div>
+            {{topics_html | safe}}
+        </div>
+        {% endif %}
+
+        <!-- User Portraits Section -->
+        {% if titles_html %}
+        <div style="margin-bottom: 50px;">
+            <div class="section-header">
+                <div class="v-bar"></div>
+                <div class="section-title-text">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="users" aria-hidden="true" class="lucide lucide-users" style="width: 24px; height: 24px; color: var(--miku-dark);"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"></path><path d="M16 3.128a4 4 0 0 1 0 7.744"></path><path d="M22 21v-2a4 4 0 0 0-3-3.87"></path><circle cx="9" cy="7" r="4"></circle></svg>
+                    {{ T.s_users[REPORT_LANG] }}
+                </div>
+            </div>
+            {{titles_html | safe}}
+        </div>
+        {% endif %}
+
+        <!-- Golden Quotes Section -->
+        {% if quotes_html %}
+        <div style="margin-bottom: 50px;">
+            <div class="section-header">
+                <div class="v-bar" style="background: var(--miku-pink-light);"></div>
+                <div class="section-title-text">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="quote" aria-hidden="true" class="lucide lucide-quote" style="width: 24px; height: 24px; color: var(--miku-dark);"><path d="M16 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"></path><path d="M5 3a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2 1 1 0 0 1 1 1v1a2 2 0 0 1-2 2 1 1 0 0 0-1 1v2a1 1 0 0 0 1 1 6 6 0 0 0 6-6V5a2 2 0 0 0-2-2z"></path></svg>
+                    {{ T.s_bible[REPORT_LANG] }}
+                </div>
+            </div>
+            {{quotes_html | safe}}
+        </div>
+        {% endif %}
+
+        <!-- Chat Quality Review -->
+        {% if chat_quality_html %}
+        <div style="margin-bottom: 50px;">
+            <div class="section-header">
+                <div class="v-bar"></div>
+                <div class="section-title-text">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="award" aria-hidden="true" class="lucide lucide-award" style="width: 24px; height: 24px; color: var(--miku-dark);"><path d="m15.477 12.89 1.515 8.526a.5.5 0 0 1-.81.47l-3.58-2.687a1 1 0 0 0-1.197 0l-3.586 2.686a.5.5 0 0 1-.81-.469l1.514-8.526"></path><circle cx="12" cy="8" r="6"></circle></svg>
+                    {{ T.s_review[REPORT_LANG] }}
+                </div>
+            </div>
+            {{chat_quality_html | safe}}
+        </div>
+        {% endif %}
+
+        <div class="footer">
+            <div class="footer-top">
+                <div class="footer-repo">
+                    <svg viewBox="0 0 16 16" width="18" height="18" fill="var(--miku-dark)" style="margin-right: 10px; flex-shrink: 0;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                    <a href="https://github.com/SXP-Simon/astrbot_plugin_qq_group_daily_analysis"
+                        target="_blank">SXP-Simon/astrbot_plugin_qq_group_daily_analysis</a>
+                </div>
+                <div class="token-data">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="cpu" aria-hidden="true" class="lucide lucide-cpu" style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px; color: var(--text-sub);"><path d="M12 20v2"></path><path d="M12 2v2"></path><path d="M17 20v2"></path><path d="M17 2v2"></path><path d="M2 12h2"></path><path d="M2 17h2"></path><path d="M2 7h2"></path><path d="M20 12h2"></path><path d="M20 17h2"></path><path d="M20 7h2"></path><path d="M7 20v2"></path><path d="M7 2v2"></path><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="8" y="8" width="8" height="8" rx="1"></rect></svg>
+                    Token usage: <span style="font-weight: 800;">{{total_tokens}}</span> <span class="token-sub">( P:
+                        {{prompt_tokens}} | C: {{completion_tokens}} )</span>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <div class="footer-time">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="clock" aria-hidden="true" class="lucide lucide-clock" style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px; color: var(--text-sub);"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>
+                    Generated at {{current_datetime}}
+                </div>
+                <div class="footer-author">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-lucide="heart" aria-hidden="true" class="lucide lucide-heart" style="width: 14px; height: 14px; vertical-align: middle; margin-right: 4px; color: #ff85a2;"><path d="M2 9.5a5.5 5.5 0 0 1 9.591-3.676.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5"></path></svg>
+                    <a href="https://github.com/shiitin" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: none;">Template by shiitin</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- lucide.createIcons() 已移除：图标在模板里就是 SVG，不再需要运行时 -->
+    <!-- ================= 按语言分组渲染（长图版） ================= -->
+    <!-- 给日文片段打 lang 标记，让 :lang(ja) 换字体栈。
+         为什么必须这么做：中日文共用同一批 Unicode 码位（U+76F4「直」中日都是这个码位），
+         CSS 的 unicode-range 分不开，只能靠 lang 属性区分字形。规则：
+           · 含假名（含半角）且整段没有中文特征字 → 整段 lang="ja"（日文句子连汉字一起走日文字形）
+           · 否则只标假名/谚文本身 → "我最喜欢初音ミク的歌"里只有「ミク」换字体，中文不受影响
+           · 纯中文内容命中 0 处，DOM/像素都不变
+         与 html_template 版逻辑一致，改一处要同时改另一边。 -->
+<script>
+    (function () {
+        "use strict";
+        var RE_KANA = /[\u3040-\u309f\u30a0-\u30ff\u31f0-\u31ff\uff66-\uff9f]/;
+        var RE_CN_MARK = /[的了吗呢吧这那们你我没啥呗哦啊]/;
+        var RE_TOKEN = /[\u3040-\u309f\u30a0-\u30ff\u31f0-\u31ff\uff66-\uff9f]+/g;
+
+        function buildFragment(text, wholeJa) {
+            var frag = document.createDocumentFragment();
+            if (wholeJa) {
+                var s = document.createElement("span");
+                s.lang = "ja";
+                s.className = "miku-lang-run";
+                s.textContent = text;
+                frag.appendChild(s);
+                return frag;
+            }
+            var last = 0, m;
+            RE_TOKEN.lastIndex = 0;
+            while ((m = RE_TOKEN.exec(text)) !== null) {
+                if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)));
+                var sp = document.createElement("span");
+                sp.lang = "ja";
+                sp.className = "miku-lang-run";
+                sp.textContent = m[0];
+                frag.appendChild(sp);
+                last = m.index + m[0].length;
+            }
+            if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+            return frag;
+        }
+
+        function tagScriptRuns() {
+            if (!document.body) return 0;
+            var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null);
+            var targets = [], n;
+            while ((n = walker.nextNode()) !== null) {
+                var p = n.parentNode;
+                if (!p) continue;
+                var pn = p.nodeName;
+                if (pn === "SCRIPT" || pn === "STYLE" || pn === "NOSCRIPT" || pn === "TEXTAREA") continue;
+                if (p.closest && p.closest("style, .miku-lang-run")) continue;
+                var t = n.nodeValue;
+                if (!t) continue;
+                if (!RE_KANA.test(t)) continue;
+                targets.push(n);
+            }
+            for (var i = 0; i < targets.length; i++) {
+                var text = targets[i].nodeValue;
+                var wholeJa = RE_KANA.test(text) && !RE_CN_MARK.test(text);
+                targets[i].parentNode.replaceChild(buildFragment(text, wholeJa), targets[i]);
+            }
+            return targets.length;
+        }
+        tagScriptRuns();
+        window.mikuTagScriptRuns = tagScriptRuns;
+    })();
+</script>
+    <!-- ================= 按语言分组渲染 END ================= -->
+<script id="miku-fit-oneline">
+    /* ---------- 标题/标签尽量不折成两行：只有确实折了才逐档缩字号 ----------
+       同一套模板要服务简体/繁体/英文，英文串普遍更长（Group Chat Daily Report、
+       CHARACTERS TODAY 这类），按中文调好的字号会折成两行。
+       判据是"实际渲染行数"（Range 量文本节点，忽略装饰图标），不是宽度——
+       这些元素宽度会随内容自适应，比宽度会误判。
+       本来就一行 → 完全不介入（中文/繁体因此零影响，长图产物与改造前逐字节一致）；
+       缩到原字号 78% 仍放不下就还原，宁可折行也不缩成蚂蚁字。
+       计时：字体加载会换宽度，页面自己的脚本也会改布局，所以分多轮重算
+       （每轮都先清掉上一轮的内联字号，从 CSS 原值重来，结果确定）。 */
+    (function () {
+        var MIN_RATIO = 0.78;
+        var MIN_RATIO_H1 = 0.68; /* 大标题专用下限 */
+        var FIT_SEL = ["h1", ".section-title-text", ".stat-txt", ".peak-label"];
+        var JOINED = FIT_SEL.join(",");
+
+        /* 只统计文本节点的 rect：装饰图标与文字顶边不一致，会把单行误判成两行 */
+        function lineCount(el) {
+            var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+            var tops = [], node, i;
+            while ((node = walker.nextNode())) {
+                if (!node.nodeValue || !node.nodeValue.trim()) continue;
+                var r = document.createRange();
+                r.selectNodeContents(node);
+                var rects = r.getClientRects();
+                for (i = 0; i < rects.length; i++) {
+                    if (rects[i].width < 1 || rects[i].height < 1) continue;
+                    tops.push(rects[i].top);
+                }
+            }
+            if (tops.length < 2) return 1;
+            var size = parseFloat(getComputedStyle(el).fontSize) || 16;
+            var tol = size * 0.5; /* 同一行内的微小抖动并掉 */
+            tops.sort(function (a, b) { return a - b; });
+            var n = 1, last = tops[0];
+            for (i = 1; i < tops.length; i++) {
+                if (tops[i] - last > tol) { n++; last = tops[i]; }
+            }
+            return n;
+        }
+
+        function fitOneLine(el) {
+            if (lineCount(el) <= 1) return; /* 本来一行：不介入 */
+            var base = parseFloat(getComputedStyle(el).fontSize);
+            if (!base) return;
+            /* 大标题额外放宽下限：它是最显眼的元素，宁可小一点也不折成两行 */
+            var min = base * (el.tagName === "H1" ? MIN_RATIO_H1 : MIN_RATIO), size = base;
+            while (size > min) {
+                size -= 0.5;
+                /* 必须带 important：模板里有带 !important 的密度/媒体查询规则，
+                   普通内联字号会被它们压住，缩了等于没缩 */
+                el.style.setProperty("font-size", size + "px", "important");
+                if (lineCount(el) <= 1) {
+                    el.dataset.mikuFit = size.toFixed(1);
+                    return;
+                }
+            }
+            el.style.removeProperty("font-size"); /* 缩到下限仍放不下：还原，让它自然折行 */
+        }
+
+        function resetAndRun() {
+            var els = document.querySelectorAll(JOINED);
+            Array.prototype.forEach.call(els, function (el) {
+                el.style.removeProperty("font-size");
+                el.removeAttribute("data-miku-fit");
+            });
+            Array.prototype.forEach.call(els, fitOneLine);
+        }
+
+        function schedule() {
+            resetAndRun();
+            /* 字体换上来、页面自己的脚本改完布局后，再补几轮 */
+            [60, 300, 1000, 2500, 5000].forEach(function (ms) {
+                setTimeout(resetAndRun, ms);
+            });
+        }
+
+        if (document.fonts) {
+            /* 字体是陆续加载的（Inter / 思源各字重），每加载完一批宽度就变了，必须重算；
+               fonts.ready 会在"当前没有在下载的字体"时就提前 resolve，单靠它不够。 */
+            if (document.fonts.addEventListener) {
+                document.fonts.addEventListener("loadingdone", resetAndRun);
+                document.fonts.addEventListener("loadingerror", resetAndRun);
+            }
+            if (document.fonts.ready) document.fonts.ready.then(resetAndRun);
+        }
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", schedule);
+        } else {
+            schedule();
+        }
+        window.addEventListener("load", resetAndRun);
+        /* 布局变化（窗口缩放 / 折叠展开 / 密度切换）时重算 */
+        var rt = null;
+        function debounced() {
+            if (rt) clearTimeout(rt);
+            rt = setTimeout(resetAndRun, 180);
+        }
+        window.addEventListener("resize", debounced);
+        if (window.ResizeObserver) {
+            var lastW = document.documentElement.clientWidth;
+            new ResizeObserver(function () {
+                var w = document.documentElement.clientWidth;
+                if (w !== lastW) { lastW = w; debounced(); }
+            }).observe(document.documentElement);
+        }
+        window.mikuFitOneLine = resetAndRun;
+    })();
+    </script>
+</body>
+
+</html>
+
+

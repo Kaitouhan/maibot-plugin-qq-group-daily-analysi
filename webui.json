@@ -1,0 +1,154 @@
+{
+  "schema_version": 2,
+  "required_capabilities": [
+    "custom_pages",
+    "image_upload"
+  ],
+  "pages": [
+    {
+      "id": "studio",
+      "title": "群分析工作台",
+      "placement": "sidebar",
+      "icon": "chart",
+      "mode": "custom",
+      "entry": "webui/index.html",
+      "layout": "document",
+      "queries": {
+        "panel": {
+          "api": "panel_query",
+          "parameters": {
+            "section": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "stream_id": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "day": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "trace_id": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "page": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "search": {
+              "type": "string",
+              "max_length": 4000
+            }
+          }
+        }
+      },
+      "actions": {
+        "operate": {
+          "api": "panel_action",
+          "parameters": {
+            "operation": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "stream_id": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "day": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "trace_id": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "template": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "output": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "value": {
+              "type": "string",
+              "max_length": 65536
+            }
+          }
+        },
+        "remove": {
+          "api": "panel_delete",
+          "parameters": {
+            "operation": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "stream_id": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "day": {
+              "type": "string",
+              "max_length": 4000
+            },
+            "value": {
+              "type": "string",
+              "max_length": 4000
+            }
+          },
+          "confirmation": "确认删除所选数据或卸载模板？"
+        },
+        "receive": {
+          "api": "receive_reference",
+          "parameters": {
+            "upload_id": {
+              "type": "string",
+              "required": true
+            },
+            "label": {
+              "type": "string",
+              "max_length": 4000
+            }
+          },
+          "confirmation": "保存此图片为漫画参考图？"
+        },
+        "chunk": {
+          "api": "template_chunk",
+          "parameters": {
+            "identifier": {
+              "type": "string",
+              "required": true,
+              "max_length": 32
+            },
+            "index": {
+              "type": "integer",
+              "required": true,
+              "minimum": 0,
+              "maximum": 127
+            },
+            "total": {
+              "type": "integer",
+              "required": true,
+              "minimum": 1,
+              "maximum": 128
+            },
+            "data": {
+              "type": "string",
+              "required": true,
+              "max_length": 49152
+            }
+          }
+        }
+      },
+      "uploads": {
+        "reference": {
+          "action": "receive",
+          "image_max_edge": 4000
+        }
+      }
+    }
+  ]
+}

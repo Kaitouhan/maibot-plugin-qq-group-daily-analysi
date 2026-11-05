@@ -7,15 +7,21 @@ import ast
 import hashlib
 import io
 import json
+import shutil
+import sys
+import tempfile
 import urllib.request
 import zipfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vendor_engine import patch_source
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "SXP-Simon/astrbot_plugin_qq_group_daily_analysis"
 
 
-def sync(archive: bytes, commit: str, root: Path = ROOT) -> None:
+def sync(archive: bytes, commit: str, root: Path = ROOT, asset_manifest: bytes | None = None) -> None:
     """验证来源提交并仅提取固定文件，不解压未知路径或覆盖适配层。
 
     Args:
@@ -50,8 +56,41 @@ def sync(archive: bytes, commit: str, root: Path = ROOT) -> None:
         license_text = bundle.read(prefix + "LICENSE")
         if b"MIT License" not in license_text:
             raise ValueError("上游许可发生变化，请人工检查")
+        files = {}
+        for member in bundle.infolist():
+            name = member.filename.removeprefix(prefix)
+            parts = PurePosixPath(name).parts
+            if not parts or ".." in parts or "\\" in name or name.startswith("/") or member.is_dir():
+                continue
+            if name.startswith("src/") or name in {"_conf_schema.json", "metadata.yaml", "LICENSE"}:
+                if member.file_size > 8 * 1024 * 1024:
+                    raise ValueError("上游文件超过同步预算")
+                files[name] = bundle.read(member)
+        files = patch_source(files)
+        if asset_manifest is None:
+            asset_manifest = fetch(
+                f"https://raw.githubusercontent.com/{REPOSITORY}/{commit}/assets/profile_assets/manifest.json"
+            )
+        json.loads(asset_manifest)
+        files["assets/profile_assets/manifest.json"] = asset_manifest
         # 全部校验完成后才写入固定目标；不导入或执行下载的脚本。
         (root / "vendor").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=root) as stage:
+            staged = Path(stage) / "upstream"
+            for name, contents in files.items():
+                destination = staged / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(contents)
+            target = root / "vendor/upstream"
+            previous = Path(stage) / "previous"
+            if target.exists():
+                target.rename(previous)
+            try:
+                shutil.move(str(staged), target)
+            except BaseException:
+                if previous.exists():
+                    previous.rename(target)
+                raise
         (root / "vendor/unified_message.py").write_bytes(message)
         (root / "vendor/prompts.json").write_text(
             json.dumps(prompts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

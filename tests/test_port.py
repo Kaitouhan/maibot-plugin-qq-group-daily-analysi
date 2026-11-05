@@ -206,6 +206,12 @@ def test_manifest_and_config_version() -> None:
         "message.get_by_time_in_chat",
         "llm.generate",
         "render.html2png",
+        "send.forward",
+        "send.custom",
+        "chat.get_avatar",
+        "config.get",
+        "api.call",
+        "webui.claim_upload",
     }
 
 

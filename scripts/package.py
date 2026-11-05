@@ -26,7 +26,9 @@ with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as bundle:
         "upstream.lock.json",
     ):
         bundle.write(ROOT / name, name)
-    for path in sorted((ROOT / "vendor").glob("*")):
-        if path.is_file():
-            bundle.write(path, path.relative_to(ROOT))
+    bundle.write(ROOT / "webui.json", "webui.json")
+    for directory in ("vendor", "webui"):
+        for path in sorted((ROOT / directory).rglob("*")):
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
+                bundle.write(path, path.relative_to(ROOT))
 print(target)
