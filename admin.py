@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import cast
 
 import aiohttp
-from maibot_sdk import API, Command, MaiBotPlugin
+from maibot_sdk import API, Command, MaiBotPlugin, Tool
 
 from .configuration import AnalysisConfig
 from .domain import SHANGHAI, Report
 from .full_runtime import EngineRuntime, IncrementalBatchSaved
 from .storage import Store
+from .vendor.upstream.src.application.services.report_query_service import ReportQueryService
 from .vendor.upstream.src.domain.value_objects import AnalysisResultPayload
 from .vendor.upstream.src.infrastructure.logging.plugin_log_buffer import global_log_buffer
 from .vendor.upstream.src.infrastructure.reporting.template_installer import (
@@ -82,6 +83,39 @@ class AdminMixin(MaiBotPlugin):
     store: Store | None
     workers: dict[str, asyncio.Task[None]]
     admin_status: dict[str, dict]
+
+    @Tool(
+        "group_daily_analysis_get_report",
+        description="查询已有群日报，不生成新报告。支持日期范围及话题、金句、称号和质量模块。只能查询插件允许的群聊。",
+        parameters={
+            "stream_id": {"type": "string", "description": "麦麦真实群聊天流 ID"},
+            "date_range": {
+                "type": "string",
+                "description": "最新、今天、昨天、前天、YYYY-MM-DD 或起止日期以 ~ 分隔，最多30天",
+                "default": "",
+            },
+            "report_section": {
+                "type": "string",
+                "description": "全部、话题、用户称号、金句、聊天质量分析；可用逗号多选",
+                "default": "全部",
+            },
+        },
+    )
+    async def query_report_tool(
+        self, stream_id: str, date_range: str = "", report_section: str = "全部", **kwargs: object
+    ) -> str:
+        if not await self.is_allowed(stream_id):
+            return "目标群不在允许名单中，不能读取报告。"
+        engine = self.engine()
+        service = ReportQueryService(
+            engine.config_manager, engine.checkpoint_store, engine.history_manager, engine.trace_store
+        )
+        start, end, error = service.parse_date_range(date_range)
+        if error:
+            return f"日期无效：{error}"
+        return await service.query_reports(
+            group_id=stream_id, start_date=start, end_date=end, report_section=report_section
+        )
 
     @property
     def settings(self) -> AnalysisConfig:

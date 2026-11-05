@@ -55,6 +55,10 @@ async def test_full_daily_roundtrip_and_all_templates(tmp_path):
         await engine.start()
         report = await engine.analyze("stream-a", date(2026, 11, 4))
         assert report.engine_payload and report.topics[0].topic == "部署讨论"
+        queried = await plugin.query_report_tool("stream-a", "2026-11-04", "话题")
+        assert "部署讨论" in queried
+        assert "不能读取" in await plugin.query_report_tool("stream-b", "2026-11-04")
+        assert "日期无效" in await plugin.query_report_tool("stream-a", "2026-01-01~2026-11-04")
         assert report.statistics.message_count == 1 and report.statistics.hours[10] == 1
         loaded = plugin.store.get("stream-a", report.day)
         assert loaded and engine.payload(loaded)["topics"][0].topic == "部署讨论"
