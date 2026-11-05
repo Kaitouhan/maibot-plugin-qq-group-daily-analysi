@@ -1,0 +1,835 @@
+"""
+配置迁移与升级器 (Config Migrator)
+
+负责 AstrBot 群聊分析插件的跨版本配置平滑迁移与自动升级，包括：
+- 提示词模板从旧版 `str.format` 到 `string.Template`（`$VAR`）的自动检测与无损升级
+- 旧版输出格式 `output_format` 从字符串到列表的兼容转换
+- 漫画角色方案、全局参考图迁移、备份保护与默认提示词正反例升级
+- 配置结构指纹比对与跨版本升级配置自动快照保护
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import shutil
+from ...host import LocalDatetime as datetime
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from ...host import RuntimePaths as StarTools
+
+from ...shared.constants import PLUGIN_NAME
+from ...utils.logger import logger
+from ...utils.template_utils import upgrade_str_format_template
+from .rendering_config import (
+    CUSTOM_RESOURCE_OPTION,
+    DEFAULT_RENDERING_STRATEGY_PRESETS,
+    parse_rendering_strategies,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from .config_manager import ConfigManager
+
+StarToolsType = type[StarTools]
+LEGACY_RENDERING_RESOURCE_KEYS = (
+    "t2i_cdn_base_url",
+    "t2i_mainland_cdn_base_url",
+    "t2i_mainland_google_fonts",
+    "t2i_mainland_gstatic",
+    "t2i_overseas_cdn_base_url",
+    "t2i_overseas_google_fonts",
+    "t2i_overseas_gstatic",
+)
+
+
+class ConfigMigrator:
+    """配置迁移与版本升级器。"""
+
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        star_tools: StarToolsType | None = None,
+    ):
+        """初始化配置迁移器。
+
+        Args:
+            config_manager: 配置管理器主实例。
+            star_tools: Star 工具类替身或模块（用于路径查找与测试替身注入）。
+        """
+        self.cm = config_manager
+        self.star_tools: StarToolsType = star_tools or StarTools
+        self._upgrade_ready = False
+        self._migration_valid = True
+
+    def run_all_migrations(self) -> None:
+        """执行所有版本升级、数据结构迁移与结构保护检查。"""
+        previous = self.protect_upgrade_data(update_baseline=False)
+        if previous is None:
+            self._migration_valid = False
+            return
+        previous_config = previous.get("config")
+        if (
+            not isinstance(previous_config, dict)
+            and getattr(self.cm.config, "first_deploy", False) is not True
+        ):
+            logger.warning(
+                "未找到升级前的配置快照，旧自定义地址和参考图无法自动恢复，缺少的新配置将使用预设。"
+            )
+        self.migrate_legacy_configs(
+            previous_config if isinstance(previous_config, dict) else None
+        )
+        self.upgrade_prompt_templates()
+        self.migrate_daily_comic_character_references(
+            previous_config if isinstance(previous_config, dict) else None
+        )
+        self.migrate_daily_comic_character_prompts()
+        self.migrate_legacy_comic_storyboard_prompts()
+        self._upgrade_ready = self._migration_valid
+        self.refresh_upgrade_protection()
+
+    def migrate_legacy_configs(self, previous_config: dict | None = None) -> bool:
+        """升级旧版配置项的类型与数据结构，确保兼容新 Schema。
+
+        Args:
+            previous_config: 宿主清理旧键之前已记录的升级保护快照。
+
+        Returns:
+            bool: 是否发生了数据修改。
+        """
+        modified = False
+        self._migration_valid = True
+
+        val = self.cm._get_group("basic").get("output_format")
+        if isinstance(val, str):
+            self.cm._ensure_group("basic")["output_format"] = [val]
+            logger.info("output_format 已从旧版 string 自动迁移为 list")
+            modified = True
+
+        group = self.cm._get_group("t2i_rendering")
+        previous_group = (previous_config or {}).get("t2i_rendering", {})
+        legacy = {
+            **(previous_group if isinstance(previous_group, dict) else {}),
+            **group,
+        }
+        strategies = group.get("t2i_rendering_strategies")
+        if strategies is None and group:
+            strategies = [dict(item) for item in DEFAULT_RENDERING_STRATEGY_PRESETS]
+        if isinstance(strategies, list):
+            try:
+                if not strategies:
+                    strategies = [
+                        dict(item) for item in DEFAULT_RENDERING_STRATEGY_PRESETS
+                    ]
+                # 先校验整组再修改，避免异常条目导致只迁移半份配置。
+                normalized = [
+                    parse_rendering_strategies([item], legacy_config=legacy)[0]
+                    for item in strategies
+                ]
+                if group.get("t2i_rendering_strategies") != strategies:
+                    group["t2i_rendering_strategies"] = strategies
+                    modified = True
+                for item, plan in zip(strategies, normalized, strict=True):
+                    # 旧版自定义服务改用独立条目，保持原资源环境和服务地址。
+                    for key in (
+                        "__template_key",
+                        "environment",
+                        "service_endpoint",
+                        "service_token",
+                    ):
+                        if item.get(key) != plan[key]:
+                            item[key] = plan[key]
+                            modified = True
+                    if (
+                        "request_timeout" in plan
+                        and item.get("request_timeout") != plan["request_timeout"]
+                    ):
+                        item["request_timeout"] = plan["request_timeout"]
+                        modified = True
+                    if "render_service" in item:
+                        del item["render_service"]
+                        modified = True
+                    if plan["render_service"] == "typst":
+                        for key in (
+                            "typst_width",
+                            "typst_ppi",
+                            "device_scale",
+                            "device_scale_factor_level",
+                            "viewport_width",
+                            "viewport_height",
+                            "full_page",
+                            "request_timeout",
+                            "google_fonts",
+                            "gstatic",
+                            "custom_google_fonts",
+                            "custom_gstatic",
+                        ):
+                            if key in item:
+                                del item[key]
+                                modified = True
+                    if "font_mode" in plan:
+                        if item.get("font_mode") != plan["font_mode"]:
+                            item["font_mode"] = plan["font_mode"]
+                            modified = True
+                    elif "font_mode" in item:
+                        del item["font_mode"]
+                        modified = True
+                    for key in ("cdn_base_url", "google_fonts", "gstatic"):
+                        if plan["render_service"] == "typst" and key != "cdn_base_url":
+                            continue
+                        if key not in item or item[key] == CUSTOM_RESOURCE_OPTION:
+                            if item.get(key) == CUSTOM_RESOURCE_OPTION:
+                                item[f"custom_{key}"] = plan[key]
+                            item[key] = plan[key]
+                            modified = True
+                ordered = [
+                    item
+                    for _plan, item in sorted(
+                        zip(normalized, strategies, strict=True),
+                        key=lambda pair: pair[0]["priority"],
+                    )
+                ]
+                if strategies != ordered:
+                    group["t2i_rendering_strategies"] = ordered
+                    modified = True
+                for key in LEGACY_RENDERING_RESOURCE_KEYS:
+                    if key in group:
+                        del group[key]
+                        modified = True
+            except ValueError:
+                self._migration_valid = False
+                logger.debug("渲染方案尚有无效字段，暂不迁移资源地址，请在配置页面修正")
+
+        if modified:
+            self.cm.save_config()
+            logger.info("旧版配置迁移完成，已自动回写")
+        return modified
+
+    def upgrade_config_item(
+        self,
+        group: str,
+        key: str,
+        setter_func: Callable[[str], None],
+    ) -> bool:
+        """升级指定配置项的值（从 str.format -> string.Template），并回写。
+
+        Args:
+            group: 配置分组名或 prompt 子分组名。
+            key: 配置键。
+            setter_func: 配置项设置回调函数。
+
+        Returns:
+            bool: 该配置项是否被升级。
+        """
+        if group in (
+            "quality_analysis_prompts",
+            "topic_analysis_prompts",
+            "user_title_analysis_prompts",
+            "golden_quote_analysis_prompts",
+            "comic_analysis_prompts",
+        ):
+            target_group = self.cm._get_group("prompts").get(group, {})
+        else:
+            target_group = self.cm._get_group(group)
+
+        val = target_group.get(key, "")
+        if not val or not isinstance(val, str):
+            return False
+
+        upgraded_val, upgraded = upgrade_str_format_template(val)
+        if upgraded and upgraded_val != val:
+            setter_func(upgraded_val)
+            logger.info(
+                f"配置项 {group}.{key} 发现旧版语法并已自动升级为 string.Template 格式。"
+            )
+            return True
+        return False
+
+    def upgrade_prompt_templates(self) -> bool:
+        """扫描并升级所有可配置的提示词模板与文件名格式模板。
+
+        Returns:
+            bool: 是否升级了任何模板。
+        """
+        modified = False
+        if hasattr(self.cm, "set_quality_analysis_prompt"):
+            modified |= self.upgrade_config_item(
+                "quality_analysis_prompts",
+                "quality_v2_prompt",
+                self.cm.set_quality_analysis_prompt,
+            )
+        if hasattr(self.cm, "set_quality_summary_prompt"):
+            modified |= self.upgrade_config_item(
+                "quality_analysis_prompts",
+                "quality_summary_prompt",
+                self.cm.set_quality_summary_prompt,
+            )
+        if hasattr(self.cm, "set_topic_analysis_prompt"):
+            modified |= self.upgrade_config_item(
+                "topic_analysis_prompts",
+                "topic_prompt",
+                self.cm.set_topic_analysis_prompt,
+            )
+        if hasattr(self.cm, "set_user_title_analysis_prompt"):
+            modified |= self.upgrade_config_item(
+                "user_title_analysis_prompts",
+                "user_title_prompt",
+                self.cm.set_user_title_analysis_prompt,
+            )
+        if hasattr(self.cm, "set_golden_quote_analysis_prompt"):
+            modified |= self.upgrade_config_item(
+                "golden_quote_analysis_prompts",
+                "golden_quote_v2_prompt",
+                self.cm.set_golden_quote_analysis_prompt,
+            )
+        if hasattr(self.cm, "set_comic_storyboard_prompt"):
+            modified |= self.upgrade_config_item(
+                "comic_analysis_prompts",
+                "comic_storyboard_prompt",
+                self.cm.set_comic_storyboard_prompt,
+            )
+
+        if hasattr(self.cm, "set_html_filename_format"):
+            modified |= self.upgrade_config_item(
+                "html",
+                "html_filename_format",
+                self.cm.set_html_filename_format,
+            )
+
+        if modified:
+            logger.info(
+                "已完成所有配置模板从 str.format 到 string.Template 的安全迁移。（已自动回写配置）"
+            )
+        return modified
+
+    def _save_config(self) -> None:
+        """安全触发配置保存。"""
+        self.cm.save_config()
+
+    def migrate_daily_comic_character_references(
+        self, previous_config: dict | None = None
+    ) -> None:
+        """从当前配置或保护快照迁移旧参考图，成功后移除旧键。
+
+        Args:
+            previous_config: 宿主清理配置前留存的旧配置快照。
+        """
+        daily_comic = self.cm._get_group("daily_comic")
+        characters = daily_comic.get("comic_characters")
+        if isinstance(characters, list) and len(characters) > 0:
+            if "drawing_reference_image" in daily_comic:
+                del daily_comic["drawing_reference_image"]
+                self._save_config()
+            return
+
+        previous_group = (previous_config or {}).get("daily_comic", {})
+        previous_references = (
+            previous_group.get("drawing_reference_image")
+            if isinstance(previous_group, dict)
+            else None
+        )
+        old_references = daily_comic.get("drawing_reference_image", previous_references)
+        if isinstance(old_references, str):
+            # 早期版本允许 URL 或任意本地路径，原生文件控件不能安全地继续使用它们。
+            backup_data = {"drawing_reference_image": old_references}
+            backup_func = getattr(
+                self.cm, "_write_comic_config_backup", self.write_comic_config_backup
+            )
+            if not backup_func(backup_data):
+                self._migration_valid = False
+                logger.warning(
+                    "旧版漫画参考图备份失败，将保留原配置并在下次重载时重试。"
+                )
+                return
+            daily_comic.pop("drawing_reference_image", None)
+            self._save_config()
+            logger.info(
+                "已备份并清除不受支持的旧版漫画参考图配置，请在 WebUI 重新选择图片。"
+            )
+            return
+
+        references = (
+            [
+                reference.strip()
+                for reference in old_references
+                if isinstance(reference, str) and reference.strip()
+            ]
+            if isinstance(old_references, list)
+            else []
+        )
+
+        if not references:
+            if "drawing_reference_image" in daily_comic:
+                del daily_comic["drawing_reference_image"]
+                self._save_config()
+            return
+
+        specific_persona_id = ""
+        if self.cm.get_use_plugin_specific_persona():
+            specific_persona_id = self.cm.get_plugin_specific_persona_id().strip()
+
+        copy_func = getattr(
+            self.cm,
+            "_copy_legacy_comic_reference_images",
+            self.copy_legacy_comic_reference_images,
+        )
+        migrated_references = copy_func(references)
+        if len(migrated_references) != len(references):
+            self._migration_valid = False
+            logger.warning(
+                "旧版漫画参考图尚未完整迁移，将保留原配置并在下次重载时重试。"
+            )
+            return
+        backup_data = {
+            "drawing_reference_image": references,
+            "use_plugin_specific_persona": (self.cm.get_use_plugin_specific_persona()),
+            "plugin_specific_persona_id": specific_persona_id,
+        }
+        backup_func = getattr(
+            self.cm, "_write_comic_config_backup", self.write_comic_config_backup
+        )
+        if not backup_func(backup_data):
+            self._migration_valid = False
+            logger.warning("旧版漫画参考图备份失败，将保留原配置并在下次重载时重试。")
+            return
+        daily_comic["comic_characters"] = [
+            {
+                "__template_key": "character",
+                "name": "默认角色方案",
+                "enable": True,
+                "persona_id": specific_persona_id,
+                "reference_images": migrated_references,
+                "storyboard_prompt": self.cm.get_comic_storyboard_prompt(),
+            }
+        ]
+        daily_comic.pop("drawing_reference_image", None)
+        self._save_config()
+        logger.info(
+            "已将旧版漫画参考图迁移到“默认角色方案”，原始配置已备份到插件数据目录。"
+        )
+
+    def migrate_daily_comic_character_prompts(self) -> None:
+        """将旧版全局分镜提示词复制到既有角色方案。"""
+        state_path = (
+            self.star_tools.get_data_dir(PLUGIN_NAME)
+            / "comic_character_prompt_migration.json"
+        )
+        if state_path.exists():
+            return
+
+        daily_comic = self.cm._get_group("daily_comic")
+        characters = daily_comic.get("comic_characters", [])
+        default_prompt = self.cm.get_comic_storyboard_prompt()
+        modified = False
+        if isinstance(characters, list):
+            for character in characters:
+                if not isinstance(character, dict):
+                    continue
+                if not str(character.get("storyboard_prompt", "")).strip():
+                    character["storyboard_prompt"] = default_prompt
+                    modified = True
+
+        try:
+            if modified:
+                self._save_config()
+                logger.info("已将默认漫画场景分析提示词迁移到既有角色方案。")
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"completed": True}), encoding="utf-8")
+        except OSError as exc:
+            logger.warning(f"迁移漫画角色场景提示词失败，将在下次重载时重试: {exc}")
+
+    def migrate_legacy_comic_storyboard_prompts(self) -> None:
+        """自动将旧版默认漫画分镜提示词升级迁移至包含 GOOD/BAD 正反例的新版模板。"""
+        try:
+            from ..analysis.analyzers.comic_analyzer import (
+                DEFAULT_COMIC_STORYBOARD_PROMPT,
+            )
+        except Exception:
+            from src.infrastructure.analysis.analyzers.comic_analyzer import (
+                DEFAULT_COMIC_STORYBOARD_PROMPT,
+            )
+
+        modified = False
+
+        prompts = self.cm._get_group("prompts")
+        comic_prompts = prompts.get("comic_analysis_prompts")
+        if isinstance(comic_prompts, dict):
+            current_global = comic_prompts.get("comic_storyboard_prompt")
+            if self.is_legacy_default_comic_prompt(current_global):
+                comic_prompts["comic_storyboard_prompt"] = (
+                    DEFAULT_COMIC_STORYBOARD_PROMPT
+                )
+                modified = True
+
+        daily_comic = self.cm._get_group("daily_comic")
+        characters = daily_comic.get("comic_characters", [])
+        if isinstance(characters, list):
+            for char in characters:
+                if not isinstance(char, dict):
+                    continue
+                char_prompt = char.get("storyboard_prompt")
+                if self.is_legacy_default_comic_prompt(char_prompt):
+                    char["storyboard_prompt"] = DEFAULT_COMIC_STORYBOARD_PROMPT
+                    modified = True
+
+        if modified:
+            try:
+                self._save_config()
+                logger.info(
+                    "已自动将历史旧版漫画分镜提示词升级迁移为包含 GOOD/BAD 正反例的新版规范模板。"
+                )
+            except Exception as exc:
+                logger.warning(f"自动迁移漫画分镜提示词失败: {exc}")
+
+    def protect_upgrade_data(self, *, update_baseline: bool = True) -> dict | None:
+        """归档旧快照，成功后允许更新基线。
+
+        Args:
+            update_baseline: 单独调用时更新基线；启动迁移前只归档。
+
+        Returns:
+            旧保护状态；归档失败时返回 None，保留原基线以便重试。
+        """
+        plugin_root = self._get_plugin_root()
+        current_schema_fingerprint = self.get_schema_fingerprint(plugin_root)
+        state_path = (
+            self.star_tools.get_data_dir(PLUGIN_NAME) / "upgrade_protection_state.json"
+        )
+        previous_state = self.read_upgrade_protection_state(state_path)
+        previous_version = str(previous_state.get("version", "")).strip()
+
+        if update_baseline and not self._migration_valid:
+            logger.warning(
+                "配置已保存，但旧配置迁移尚未完成，保护快照暂不替换；请在修正后重载插件。"
+            )
+            return previous_state
+
+        if not previous_state:
+            logger.debug("未找到升级保护基线，将在迁移完成后记录当前配置。")
+
+        if previous_state.get(
+            "schema_fingerprint"
+        ) != current_schema_fingerprint and isinstance(
+            previous_state.get("config"), dict
+        ):
+            backup_func = getattr(
+                self.cm,
+                "_write_upgrade_config_backup",
+                self.write_upgrade_config_backup,
+            )
+            if not backup_func(previous_state["config"], previous_version):
+                logger.warning("插件旧配置备份失败，本次不会更新升级保护状态。")
+                return None
+
+        if update_baseline:
+            self._upgrade_ready = True
+            self.refresh_upgrade_protection()
+        return previous_state
+
+    def refresh_upgrade_protection(self) -> None:
+        """在迁移完成或正常保存后刷新已成功持久化的配置快照。"""
+        if not self._upgrade_ready:
+            return
+        plugin_root = self._get_plugin_root()
+        state_path = (
+            self.star_tools.get_data_dir(PLUGIN_NAME) / "upgrade_protection_state.json"
+        )
+        config_data = dict(self.cm.config) if self.cm.config else {}
+        self.save_upgrade_protection_state(
+            state_path,
+            {
+                "version": self.get_plugin_version(plugin_root),
+                "schema_fingerprint": self.get_schema_fingerprint(plugin_root),
+                "captured_at": datetime.now().isoformat(),
+                "config": config_data,
+            },
+        )
+
+    def _get_plugin_root(self) -> Path:
+        """获取插件根目录（支持测试替身覆盖 cm._get_plugin_root）。
+
+        Returns:
+            Path: 插件根目录路径。
+        """
+        if hasattr(self.cm, "_get_plugin_root") and callable(self.cm._get_plugin_root):
+            return self.cm._get_plugin_root()
+        return self.get_plugin_root()
+
+    @staticmethod
+    def get_plugin_root() -> Path:
+        """获取插件根目录。
+
+        Returns:
+            Path: 插件根目录绝对路径。
+        """
+        return Path(__file__).resolve().parents[3]
+
+    @staticmethod
+    def get_plugin_version(plugin_root: Path) -> str:
+        """从 metadata.yaml 读取当前插件版本。
+
+        Args:
+            plugin_root: 插件根目录路径。
+
+        Returns:
+            str: 版本号字符串，读取失败时返回 'unknown'。
+        """
+        try:
+            metadata = (plugin_root / "metadata.yaml").read_text(encoding="utf-8")
+            match = re.search(r"^version:\s*([^\s#]+)", metadata, re.MULTILINE)
+            if match:
+                return match.group(1)
+        except OSError as exc:
+            logger.warning(f"读取插件版本失败，将使用未知版本标识: {exc}")
+        return "unknown"
+
+    @staticmethod
+    def get_schema_fingerprint(plugin_root: Path) -> str:
+        """计算配置结构指纹，忽略描述等纯界面字段。
+
+        Args:
+            plugin_root: 插件根目录路径。
+
+        Returns:
+            str: 配置结构 SHA256 指纹。
+        """
+        try:
+            schema = json.loads(
+                (plugin_root / "_conf_schema.json").read_text(encoding="utf-8-sig")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(f"读取插件配置结构失败: {exc}")
+            return ""
+
+        def extract_shape(items: dict) -> dict:
+            shape = {}
+            for key, item in items.items():
+                if not isinstance(item, dict):
+                    continue
+                entry = {"type": item.get("type")}
+                for property_name in ("default", "options", "file_types"):
+                    if property_name in item:
+                        entry[property_name] = item[property_name]
+                if isinstance(item.get("items"), dict):
+                    entry["items"] = extract_shape(item["items"])
+                if isinstance(item.get("templates"), dict):
+                    entry["templates"] = {
+                        template_key: extract_shape(template.get("items", {}))
+                        for template_key, template in item["templates"].items()
+                        if isinstance(template, dict)
+                    }
+                shape[key] = entry
+            return shape
+
+        serialized_shape = json.dumps(
+            extract_shape(schema),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(serialized_shape.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def read_upgrade_protection_state(state_path: Path) -> dict:
+        """读取最近一次成功保存的升级保护快照。
+
+        Args:
+            state_path: 升级状态记录文件路径。
+
+        Returns:
+            dict: 升级保护状态字典。
+        """
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            return state if isinstance(state, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    @staticmethod
+    def save_upgrade_protection_state(state_path: Path, state: dict) -> None:
+        """原子保存升级保护状态。
+
+        Args:
+            state_path: 升级状态记录文件路径。
+            state: 待写入的状态字典。
+        """
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = state_path.with_suffix(".tmp")
+            temporary_path.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            temporary_path.replace(state_path)
+        except OSError as exc:
+            logger.warning(f"保存插件升级保护状态失败: {exc}")
+
+    @staticmethod
+    def write_upgrade_config_backup_data(
+        config: dict[str, object],
+        version: str,
+        star_tools: StarToolsType | None = None,
+    ) -> bool:
+        """保存旧版本配置快照，并最多保留二十份。
+
+        Args:
+            config: 最近一次成功保存或完成启动迁移后的插件配置快照。
+            version: 该配置快照对应的旧插件版本。
+            star_tools: Star 工具类替身或模块。
+
+        Returns:
+            bool: 备份写入并完成轮换时返回 True，否则返回 False。
+        """
+        try:
+            tools = star_tools or StarTools
+            backup_dir = tools.get_data_dir(PLUGIN_NAME) / "config_backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            safe_version = re.sub(r"[^A-Za-z0-9._-]", "_", version) or "unknown"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            backup_path = backup_dir / f"plugin_config_{safe_version}_{timestamp}.json"
+            backup_path.write_text(
+                json.dumps(
+                    {
+                        "backed_up_at": datetime.now().isoformat(),
+                        "plugin_version": version,
+                        "config": config,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            backups = sorted(
+                backup_dir.glob("plugin_config_*.json"),
+                key=lambda path: (path.stat().st_mtime, path.name),
+            )
+            for expired_backup in backups[:-20]:
+                expired_backup.unlink()
+            logger.info(
+                "检测到插件配置结构变化，已备份旧配置快照："
+                f"旧版本={version}，文件={backup_path.name}，路径={backup_path.resolve()}，"
+                f"当前保留={min(len(backups), 20)} 份。"
+            )
+            return True
+        except OSError as exc:
+            logger.warning(f"备份插件旧配置失败: {exc}")
+            return False
+
+    def write_upgrade_config_backup(
+        self,
+        config: dict[str, object],
+        version: str,
+        star_tools: StarToolsType | None = None,
+    ) -> bool:
+        """保存旧版本配置快照。
+
+        Args:
+            config: 最近一次成功保存或完成启动迁移后的插件配置快照。
+            version: 该配置快照对应的旧插件版本。
+            star_tools: Star 工具类替身或模块。
+
+        Returns:
+            bool: 备份写入并完成轮换时返回 True，否则返回 False。
+        """
+        tools = star_tools or self.star_tools
+        return self.write_upgrade_config_backup_data(config, version, star_tools=tools)
+
+    @staticmethod
+    def is_legacy_default_comic_prompt(prompt: object) -> bool:
+        """判断是否为旧版默认漫画分镜提示词（尚未包含 GOOD/BAD 正反例规范）。
+
+        Args:
+            prompt: 待检查的提示词对象。
+
+        Returns:
+            bool: 是否为旧版默认提示词。
+        """
+        if not isinstance(prompt, str) or not prompt.strip():
+            return False
+        text = prompt.strip()
+        if "GOOD EXAMPLE" in text:
+            return False
+        return (
+            '请输出包含 "scene" 字段的 JSON 对象。' in text
+            or '请输出包含 \\"scene\\" 字段的 JSON 对象。' in text
+            or (
+                "你是一个资深的漫画分镜师与 AI 绘画提示词专家。" in text
+                and "【核心视觉、台词与双层排版规则】" in text
+            )
+        )
+
+    @staticmethod
+    def write_comic_config_backup(
+        data: Mapping[str, object],
+        star_tools: StarToolsType | None = None,
+    ) -> bool:
+        """写入漫画配置迁移备份。
+
+        Args:
+            data: 需要保留的旧版漫画相关配置。
+            star_tools: Star 工具类替身或模块。
+
+        Returns:
+            bool: 备份写入是否成功。
+        """
+        try:
+            tools = star_tools or StarTools
+            backup_dir = tools.get_data_dir(PLUGIN_NAME) / "config_backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = backup_dir / f"comic_character_migration_{timestamp}.json"
+            backup_path.write_text(
+                json.dumps(
+                    {
+                        "migrated_at": datetime.now().isoformat(),
+                        "config": dict(data),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            return True
+        except OSError as exc:
+            logger.warning(f"保存漫画配置迁移备份失败: {exc}")
+            return False
+
+    @staticmethod
+    def copy_legacy_comic_reference_images(
+        references: list[str],
+        star_tools: StarToolsType | None = None,
+    ) -> list[str]:
+        """复制旧参考图到角色模板对应的原生上传目录。
+
+        Args:
+            references: 旧版全局参考图相对路径列表。
+            star_tools: Star 工具类替身或模块。
+
+        Returns:
+            list[str]: 可写入新角色方案的参考图相对路径列表。
+        """
+        tools = star_tools or StarTools
+        plugin_data_dir = tools.get_data_dir(PLUGIN_NAME)
+        relative_dir = Path(
+            "files/daily_comic/comic_characters/templates/character/reference_images"
+        )
+        target_dir = plugin_data_dir / relative_dir
+        migrated_references = []
+        for index, reference in enumerate(references, start=1):
+            try:
+                source_path = (plugin_data_dir / reference).resolve()
+                source_path.relative_to(plugin_data_dir.resolve())
+                if not source_path.is_file():
+                    logger.warning(f"旧版漫画参考图不存在，跳过迁移: {reference}")
+                    continue
+
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target_name = f"migrated_{index}_{source_path.name}"
+                target_path = target_dir / target_name
+                shutil.copy2(source_path, target_path)
+                migrated_references.append((relative_dir / target_name).as_posix())
+            except (OSError, ValueError) as exc:
+                logger.warning(f"迁移旧版漫画参考图失败 {reference}: {exc}")
+        return migrated_references

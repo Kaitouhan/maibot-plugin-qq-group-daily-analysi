@@ -68,6 +68,7 @@ class Report(BaseModel):
     quality: Quality | None = None
     warnings: list[str] = Field(default_factory=list)
     analyzed_messages: int = 0
+    engine_payload: dict[str, object] = Field(default_factory=dict)
 
 
 def day_bounds(day: date) -> tuple[float, float]:

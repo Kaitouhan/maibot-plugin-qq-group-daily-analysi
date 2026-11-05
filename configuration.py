@@ -5,7 +5,7 @@ from pydantic import field_validator
 
 
 class PluginSection(PluginConfigBase):
-    config_version: str = Field(default="0.1.0", description="配置结构版本")
+    config_version: str = Field(default="1.0.0", description="配置结构版本")
     enabled: bool = Field(default=True, description="启用群分析")
 
 
@@ -28,6 +28,30 @@ class AnalysisConfig(PluginConfigBase):
     titles_enabled: bool = Field(default=True, description="启用娱乐性群友称号")
     llm_timeout: int = Field(default=120, ge=10, le=600, description="单次模型调用超时秒数")
     cooldown_seconds: int = Field(default=300, ge=0, le=86400, description="同群手动重新分析冷却时间")
+    report_template: str = Field(default="HatsuneMiku", description="原插件内置或自定义报告模板")
+    platforms: list[str] = Field(
+        default_factory=lambda: ["all"], description="允许的平台；all 表示麦麦已接入的全部群聊平台"
+    )
+    onebot_endpoint: str = Field(default="", description="可选 OneBot HTTP API，用于历史补拉、群文件、群相册和表情回应")
+    onebot_token: str = Field(default="", description="OneBot HTTP Access Token", json_schema_extra={"secret": True})
+    advanced_json: str = Field(
+        default="{}", description="原插件完整高级配置 JSON；后台可按字段编辑，无需手工填写全部配置"
+    )
+    persona_profiles_json: str = Field(default="{}", description="原人格 ID 到麦麦分析人格提示词的 JSON 映射")
+    external_drawing_api: str = Field(
+        default="", description="可选麦麦生图插件公开 API 全名，替代原 AstrBot 生图插件互调"
+    )
+    incremental_streams: list[str] = Field(default_factory=list, description="启用自动增量批次的真实群聊流 ID")
+    incremental_interval_minutes: int = Field(default=60, ge=1, le=1440, description="增量批次检查间隔（分钟）")
+
+    @field_validator("advanced_json")
+    @classmethod
+    def valid_advanced(cls, value: str) -> str:
+        import json
+
+        if not isinstance(json.loads(value), dict):
+            raise ValueError("高级配置必须是 JSON 对象")
+        return value
 
     @field_validator("send_at")
     @classmethod
@@ -40,6 +64,6 @@ class AnalysisConfig(PluginConfigBase):
     @field_validator("output")
     @classmethod
     def valid_output(cls, value: str) -> str:
-        if value not in {"image", "text"}:
-            raise ValueError("输出必须为 image 或 text")
+        if value not in {"image", "text", "html", "markdown", "pdf"}:
+            raise ValueError("输出必须为 image、text、html、markdown 或 pdf")
         return value

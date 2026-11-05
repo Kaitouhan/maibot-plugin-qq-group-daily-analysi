@@ -8,9 +8,9 @@ packages = []
 
 [project]
 name = "maibot-plugin-qq-group-daily-analysis"
-version = "0.1.0"
+version = "1.0.0"
 requires-python = ">=3.12"
-dependencies = ["maibot-plugin-sdk>=2.16.0,<3"]
+dependencies = ["maibot-plugin-sdk>=2.16.0,<3", "aiohttp>=3.10", "httpx>=0.27", "pillow>=10", "diskcache>=5.6", "json-repair>=0.60", "ulid-py>=1.1", "psutil>=6", "typst>=0.15,<0.16", "jinja2>=3.1", "tzdata>=2025.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff", "pyright"]
@@ -22,6 +22,7 @@ testpaths = ["tests"]
 
 [tool.ruff]
 line-length = 120
+extend-exclude = ["vendor/upstream"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
@@ -29,4 +30,5 @@ select = ["E4", "E7", "E9", "F", "I"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
-include = ["plugin.py", "domain.py", "analysis.py", "configuration.py", "reporting.py", "storage.py"]
+include = ["plugin.py", "admin.py", "full_runtime.py", "platform_bridge.py", "compatibility.py", "domain.py", "analysis.py", "configuration.py", "reporting.py", "storage.py"]
+ignore = ["vendor/upstream"]

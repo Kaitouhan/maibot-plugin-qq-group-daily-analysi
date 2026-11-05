@@ -1,0 +1,703 @@
+"""分析产物恢复与重绘服务模块
+
+负责群聊分析 Checkpoint 断点续跑（Resume）以及历史分析产物重新渲染（Rerender）。
+"""
+
+from __future__ import annotations
+
+import asyncio
+from ...host import local_datetime_module as dt
+import re
+import shutil
+import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from ...host import RuntimePaths as StarTools
+
+from ...domain.value_objects import (
+    AnalysisResultPayload,
+    GroupStatistics,
+    TokenUsage,
+)
+from ...domain.value_objects.unified_message import UnifiedMessage
+from ...infrastructure.reporting.html_renderer import bind_group_html_renderer
+from ...infrastructure.reporting.report_image import save_report_image
+from ...shared.constants import PLUGIN_NAME, AnalysisStage
+from ...shared.trace_context import TraceContext
+from ...utils.logger import logger
+from .analysis_serializer import AnalysisResultSerializer
+from .pipeline_context import PipelineContext
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from ...domain.repositories.analysis_repository import IAnalysisProvider
+    from ...domain.repositories.persistence_repository import ICheckpointStore
+    from ...domain.repositories.report_repository import IReportGenerator
+    from ...domain.services.statistics_service import StatisticsService
+    from ...infrastructure.config.config_manager import ConfigManager
+    from ...infrastructure.persistence.history_manager import HistoryManager
+    from ...infrastructure.platform.bot_manager import BotManager
+    from .task_guard import TaskGuard
+
+
+class AnalysisRecoveryService:
+    """分析恢复与重绘服务 - 提供幂等断点续跑与按模板重新渲染。"""
+
+    config_manager: ConfigManager
+    bot_manager: BotManager
+    history_manager: HistoryManager
+    report_generator: IReportGenerator
+    llm_analyzer: IAnalysisProvider
+    statistics_service: StatisticsService
+    task_guard: TaskGuard
+    checkpoint_store: ICheckpointStore | None
+    html_render: Callable[..., Awaitable[str | bytes | None]] | None
+    _serializer: AnalysisResultSerializer
+
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        bot_manager: BotManager,
+        history_manager: HistoryManager,
+        report_generator: IReportGenerator,
+        llm_analyzer: IAnalysisProvider,
+        statistics_service: StatisticsService,
+        task_guard: TaskGuard,
+        checkpoint_store: ICheckpointStore | None = None,
+        html_render: Callable[..., Awaitable[str | bytes | None]] | None = None,
+    ) -> None:
+        """初始化恢复与重绘服务。
+
+        Args:
+            config_manager: 配置提供者。
+            bot_manager: 机器人管理器。
+            history_manager: 历史持久化管理器。
+            report_generator: 报表生成器。
+            llm_analyzer: LLM 分析器。
+            statistics_service: 统计领域服务。
+            task_guard: 任务排他锁守卫。
+            checkpoint_store: 检查点持久化仓储。
+            html_render: HTML 渲染回调。
+        """
+        self.config_manager = config_manager
+        self.bot_manager = bot_manager
+        self.history_manager = history_manager
+        self.report_generator = report_generator
+        self.llm_analyzer = llm_analyzer
+        self.statistics_service = statistics_service
+        self.task_guard = task_guard
+        self.checkpoint_store = checkpoint_store
+        self.html_render = html_render
+
+    async def rerender_report(
+        self,
+        group_id: str,
+        date_str: str,
+        template_name: str,
+        platform_id: str | None = None,
+        render_format: str = "image",
+        trace_id: str | None = None,
+    ) -> dict[str, object]:
+        """根据历史分析产物重新渲染指定模板风格的报告。
+
+        Args:
+            group_id: 群组 ID。
+            date_str: 分析日期（YYYY-MM-DD）。
+            template_name: 模板主题名称。
+            platform_id: 平台实例标识。
+            render_format: 输出格式（'image' 或 'html'）。
+            trace_id: 追踪 Trace ID。
+
+        Returns:
+            包含渲染结果与生成文件路径的字典。
+        """
+        if render_format not in {"image", "html"}:
+            return {"success": False, "reason": "不支持的报告格式"}
+        analysis_result: AnalysisResultPayload | None = None
+        from_checkpoint = False
+        # 显式重绘某次任务时，专属检查点优先于按日保存的最近一次结果。
+        if trace_id and self.checkpoint_store:
+            cached_data = await asyncio.to_thread(
+                self.checkpoint_store.get_checkpoint,
+                group_id,
+                date_str,
+                AnalysisStage.LLM_ANALYSIS.value,
+                trace_id=trace_id,
+            )
+            if isinstance(cached_data, dict) and isinstance(
+                cached_data.get("statistics"), (dict, GroupStatistics)
+            ):
+                analysis_result = AnalysisResultSerializer.deserialize(cached_data)
+                from_checkpoint = True
+        if not analysis_result and self.history_manager:
+            try:
+                hist_data = await self.history_manager.get_analysis(group_id, date_str)
+                # 旧 KV 记录只有摘要，不能作为可恢复的完整分析产物。
+                if (
+                    isinstance(hist_data, dict)
+                    and isinstance(hist_data.get("statistics"), (dict, GroupStatistics))
+                    and (not trace_id or hist_data.get("trace_id") == trace_id)
+                ):
+                    analysis_result = AnalysisResultSerializer.deserialize(hist_data)
+                    if not trace_id and isinstance(hist_data.get("trace_id"), str):
+                        trace_id = str(hist_data["trace_id"]) or None
+            except Exception as e:
+                logger.debug(f"从 HistoryManager 获取分析记录异常: {e}")
+
+        if not analysis_result and not trace_id and self.checkpoint_store:
+            cached_data = await asyncio.to_thread(
+                self.checkpoint_store.get_checkpoint,
+                group_id,
+                date_str,
+                "LLM_ANALYSIS",
+                trace_id=trace_id or "",
+            )
+            if isinstance(cached_data, dict) and isinstance(
+                cached_data.get("statistics"), (dict, GroupStatistics)
+            ):
+                analysis_result = AnalysisResultSerializer.deserialize(cached_data)
+                from_checkpoint = True
+
+        if not analysis_result:
+            return {
+                "success": False,
+                "reason": f"未找到群 {group_id} 在 {date_str} 的完整分析产物记录",
+            }
+
+        reports_dir = StarTools.get_data_dir(PLUGIN_NAME) / "reports"
+        # 所有外部标识只参与文件名，不能改变报告目录。
+        components = [group_id, trace_id or "", template_name]
+        safe_group, safe_trace, safe_template = [
+            re.sub(r'[\s/\\:*?"<>|\x00-\x1f]', "_", value)[:64] for value in components
+        ]
+        ts_str = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = "html" if render_format == "html" else "jpg"
+        trace_suffix = f"_{safe_trace}" if safe_trace else ""
+        filename = f"report_{safe_group}_{ts_str}{trace_suffix}_{safe_template}_{uuid.uuid4().hex[:8]}.{suffix}"
+        dest = reports_dir / filename
+        image_url: str | None = None
+        try:
+            await asyncio.to_thread(reports_dir.mkdir, parents=True, exist_ok=True)
+            if render_format == "html":
+                html_path, _ = await self.report_generator.generate_html_report(
+                    analysis_result=analysis_result,
+                    group_id=group_id,
+                    template_theme=template_name,
+                    custom_filename=filename,
+                    trace_id=trace_id,
+                )
+                if not html_path or not Path(html_path).is_file():
+                    return {
+                        "success": False,
+                        "reason": "HTML 报告生成失败，未产生可用文件",
+                    }
+                source = Path(html_path)
+                if source.resolve() != dest.resolve():
+                    await asyncio.to_thread(shutil.copy2, source, dest)
+            else:
+                image_url, _ = await self.report_generator.generate_image_report(
+                    analysis_result=analysis_result,
+                    group_id=group_id,
+                    html_render_func=bind_group_html_renderer(
+                        self.html_render, group_id, platform_id
+                    ),
+                    template_theme=template_name,
+                )
+                if not image_url:
+                    return {
+                        "success": False,
+                        "reason": "图片报告生成失败，未产生可用文件",
+                    }
+                dest = await asyncio.to_thread(save_report_image, image_url, dest)
+                filename = dest.name
+            if not dest.is_file() or dest.stat().st_size == 0:
+                return {"success": False, "reason": "报告生成失败，产物内容为空"}
+        except Exception as e:
+            logger.warning(f"重新渲染报告失败: {e}")
+            return {"success": False, "reason": f"重新渲染报告失败: {e}"}
+
+        await TraceContext.register_report(
+            dest, group_id, render_format, trace_id or ""
+        )
+        return {
+            "success": True,
+            "filename": filename,
+            "report_path": str(dest),
+            "image_url": image_url,
+            "is_html": render_format == "html",
+            "from_checkpoint": from_checkpoint,
+            "trace_id": trace_id,
+        }
+
+    async def resume_analysis(
+        self,
+        trace_id: str,
+        group_id: str,
+        platform_id: str | None = None,
+        date_str: str | None = None,
+        template_name: str | None = None,
+        checkpoint_trace_id: str | None = None,
+        fallback_daily_func: Callable[..., Awaitable[dict[str, object]]] | None = None,
+    ) -> dict[str, object]:
+        """从上一次 Checkpoint 检查点执行幂等断点续跑。
+
+        Args:
+            trace_id: 待恢复的 Trace ID。
+            group_id: 群组 ID。
+            platform_id: 平台标识。
+            date_str: 日期字符串（缺省为今日）。
+            template_name: 模板主题名称。
+            checkpoint_trace_id: 快照所属的原任务 ID，缺省使用 trace_id。
+            fallback_daily_func: 未命中快照时回退执行全量分析的异步函数。
+
+        Returns:
+            包含执行产物与恢复阶段标识的字典。
+
+        Raises:
+            ValueError: 缺少平台适配器时抛出。
+        """
+        if not date_str:
+            date_str = dt.datetime.now().strftime("%Y-%m-%d")
+        checkpoint_trace_id = checkpoint_trace_id or trace_id
+
+        trace = TraceContext.current()
+        if not trace:
+            trace = TraceContext.get_or_create(
+                trace_id=trace_id,
+                group_id=str(group_id),
+                platform=platform_id or "",
+                trigger_type="resume",
+                auto_bind=True,
+            )
+        if template_name and template_name != "auto":
+            trace.metadata["override_template_name"] = str(template_name)
+        trace.metadata["checkpoint_trace_id"] = checkpoint_trace_id
+        trace.metadata["analysis_date"] = date_str
+
+        topic_enabled = self.config_manager.get_topic_analysis_enabled()
+        user_title_enabled = self.config_manager.get_user_title_analysis_enabled()
+        golden_quote_enabled = self.config_manager.get_golden_quote_analysis_enabled()
+        chat_quality_enabled = self.config_manager.get_chat_quality_analysis_enabled()
+
+        pipeline = PipelineContext(
+            trace=trace,
+            checkpoint_store=self.checkpoint_store,
+            group_id=group_id,
+            date_str=date_str,
+        )
+
+        cached_result = await self._load_analysis_checkpoint(
+            group_id, date_str, checkpoint_trace_id
+        )
+        if cached_result is not None:
+            # 续跑任务拥有独立 ID，复用产物也必须归档到新任务，供再次续跑读取。
+            if self.checkpoint_store:
+                await asyncio.to_thread(
+                    self.checkpoint_store.save_checkpoint,
+                    group_id=group_id,
+                    date_str=date_str,
+                    stage_name=AnalysisStage.LLM_ANALYSIS.value,
+                    data=AnalysisResultSerializer.serialize(dict(cached_result)),
+                    trace_id=trace.trace_id,
+                )
+            cached_topics = cached_result.get("topics", [])
+            cached_titles = cached_result.get("user_titles", [])
+            cached_stats = cached_result.get("statistics")
+            if cached_stats:
+                cached_quotes = cached_stats.golden_quotes
+                cached_msg_count = cached_stats.message_count
+            else:
+                cached_quotes = []
+                cached_msg_count = 0
+            cached_quality = cached_result.get("chat_quality_review")
+
+            has_required_topics = not topic_enabled or bool(cached_topics)
+            has_required_titles = not user_title_enabled or bool(cached_titles)
+            has_required_quotes = not golden_quote_enabled or bool(cached_quotes)
+            has_required_quality = not chat_quality_enabled or bool(cached_quality)
+
+            if (
+                has_required_topics
+                and has_required_titles
+                and has_required_quotes
+                and has_required_quality
+            ):
+                logger.info(
+                    f"群 {group_id} 命中完整的 LLM 分析产物快照，跳过消息拉取与 LLM 分析，直接进入报告排版与分发"
+                )
+                async with self.task_guard.group_lock(group_id, "daily"):
+                    adapter = self.bot_manager.get_adapter(platform_id)
+                    pipeline.restore_checkpoint_span(
+                        AnalysisStage.LLM_ANALYSIS,
+                        {"direct_render": True},
+                    )
+                    return {
+                        "success": True,
+                        "analysis_result": cached_result,
+                        "messages_count": cached_msg_count,
+                        "adapter": adapter,
+                        "group_id": group_id,
+                        "platform_id": adapter.platform_id
+                        if adapter
+                        else (platform_id or ""),
+                        "resumed_from": AnalysisStage.LLM_ANALYSIS.value,
+                        "trace_id": trace_id,
+                    }
+
+        clean_checkpoint = (
+            (
+                await asyncio.to_thread(
+                    self.checkpoint_store.get_checkpoint,
+                    group_id,
+                    date_str,
+                    AnalysisStage.CLEAN_MESSAGES.value,
+                    trace_id=checkpoint_trace_id,
+                )
+            )
+            if self.checkpoint_store
+            else None
+        )
+
+        if not clean_checkpoint or not isinstance(clean_checkpoint, dict):
+            logger.info(f"未找到群 {group_id} 的前置清洗快照，回退到全量重新分析")
+            if trace:
+                trace.metadata["fallback_to_fresh_run"] = True
+                trace.metadata["fallback_reason"] = "checkpoint_missing_auto_refetched"
+                trace.metadata["resumed_from"] = "fresh_run_fallback"
+            if fallback_daily_func:
+                result = await fallback_daily_func(
+                    group_id=group_id,
+                    platform_id=platform_id,
+                    manual=True,
+                )
+                result["fallback_to_fresh_run"] = True
+                result["fallback_reason"] = "checkpoint_missing_auto_refetched"
+                result["resumed_from"] = "fresh_run_fallback"
+                return result
+            return {"success": False, "reason": "checkpoint_missing"}
+
+        logger.info(
+            f"群 {group_id} 命中 Checkpoint 快照，跳过消息拉取与清洗，直接进入 LLM 幂等续跑"
+        )
+        async with self.task_guard.group_lock(group_id, "daily"):
+            adapter = self.bot_manager.get_adapter(platform_id)
+            if not adapter:
+                raise ValueError(f"未找到平台 {platform_id} 的适配器")
+
+            if self.checkpoint_store:
+                await asyncio.to_thread(
+                    self.checkpoint_store.save_checkpoint,
+                    group_id=group_id,
+                    date_str=date_str,
+                    stage_name=AnalysisStage.CLEAN_MESSAGES.value,
+                    data=clean_checkpoint,
+                    trace_id=trace.trace_id,
+                )
+            cleaned_result, unified_messages, top_users = (
+                self._restore_clean_checkpoint(clean_checkpoint, group_id)
+            )
+            statistics = cleaned_result["statistics"]
+            user_activity = cleaned_result.get("user_analysis") or {}
+
+            pipeline.restore_checkpoint_span(AnalysisStage.CLEAN_MESSAGES)
+
+            cached_result = cached_result or AnalysisResultSerializer.deserialize({})
+            topics = cached_result["topics"]
+            user_titles = cached_result["user_titles"]
+            cached_stats = cached_result["statistics"]
+            chat_quality_review = cached_result.get("chat_quality_review")
+            golden_quotes = cached_stats.golden_quotes
+            total_token_usage = cached_stats.token_usage
+
+            statistics.golden_quotes = golden_quotes
+            statistics.token_usage = total_token_usage
+            partial_result: AnalysisResultPayload = {
+                "statistics": statistics,
+                "topics": topics,
+                "user_titles": user_titles,
+                "user_analysis": user_activity,
+                "chat_quality_review": chat_quality_review,
+            }
+            analysis_result = await self._complete_missing_sections(
+                pipeline, partial_result, unified_messages, top_users, platform_id
+            )
+            if analysis_result is None:
+                return {
+                    "success": False,
+                    "reason": "llm_analysis_failed",
+                    "error": "大模型文本分析全部子任务失败，已中止续跑",
+                }
+            topics = analysis_result["topics"]
+            user_titles = analysis_result["user_titles"]
+
+            async with pipeline.step(
+                AnalysisStage.SAVE_SUMMARY,
+                save_checkpoint=True,
+                serializer=AnalysisResultSerializer.serialize,
+            ) as step:
+                await self.history_manager.save_analysis(
+                    group_id, dict(analysis_result), date_str=date_str
+                )
+                if self.checkpoint_store:
+                    try:
+                        cur_trace_id = trace.trace_id if trace else ""
+                        await asyncio.to_thread(
+                            self.checkpoint_store.save_checkpoint,
+                            group_id=group_id,
+                            date_str=date_str,
+                            stage_name=AnalysisStage.LLM_ANALYSIS.value,
+                            data=AnalysisResultSerializer.serialize(
+                                dict(analysis_result)
+                            ),
+                            trace_id=cur_trace_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"保存分析 Checkpoint 失败: {e}")
+                step.set_payload(
+                    date=date_str,
+                    topics_persisted=len(topics),
+                    titles_persisted=len(user_titles),
+                    checkpoint_saved=bool(self.checkpoint_store),
+                )
+
+            return {
+                "success": True,
+                "analysis_result": analysis_result,
+                "messages_count": len(unified_messages),
+                "adapter": adapter,
+                "group_id": group_id,
+                "platform_id": adapter.platform_id if adapter else (platform_id or ""),
+                "resumed_from": AnalysisStage.CLEAN_MESSAGES.value,
+                "trace_id": trace_id,
+            }
+
+    @staticmethod
+    def _restore_clean_checkpoint(
+        clean_checkpoint: dict[str, object], group_id: str
+    ) -> tuple[
+        AnalysisResultPayload, list[UnifiedMessage], list[dict[str, object]] | None
+    ]:
+        """在恢复边界还原清洗阶段统计、消息和活跃成员候选。
+
+        Args:
+            clean_checkpoint: 持久化的清洗快照，兼容内存中的消息对象。
+            group_id: 旧消息缺少群标识时采用的目标群号。
+
+        Returns:
+            领域分析结果、恢复的消息列表及可选活跃成员候选列表。
+        """
+        stats_data = clean_checkpoint.get("statistics")
+        deserialized = AnalysisResultSerializer.deserialize(
+            {
+                "statistics": stats_data if isinstance(stats_data, dict) else {},
+                "user_analysis": clean_checkpoint.get("user_activity", {}),
+                "user_titles": clean_checkpoint.get("top_users", []),
+            }
+        )
+        top_users_raw = clean_checkpoint.get("top_users")
+        top_users: list[dict[str, object]] | None = (
+            top_users_raw if isinstance(top_users_raw, list) else None
+        )
+        unified_messages_raw = clean_checkpoint.get("unified_messages")
+        unified_messages: list[UnifiedMessage] = []
+        if isinstance(unified_messages_raw, list):
+            for message in unified_messages_raw:
+                if isinstance(message, UnifiedMessage):
+                    unified_messages.append(message)
+                elif isinstance(message, dict):
+                    # 续跑 LLM 只读取已清洗文本和发送者信息，无须恢复原始附件。
+                    timestamp = message.get("timestamp", 0)
+                    try:
+                        restored_timestamp = (
+                            int(timestamp)
+                            if isinstance(timestamp, (int, float, str))
+                            else 0
+                        )
+                    except (ValueError, OverflowError):
+                        # 时间戳不参与文本续跑，旧值无效时保留消息正文并使用零值。
+                        restored_timestamp = 0
+                    unified_messages.append(
+                        UnifiedMessage(
+                            message_id=str(message.get("message_id", "")),
+                            sender_id=str(message.get("sender_id", "")),
+                            sender_name=str(message.get("sender_name", "")),
+                            group_id=str(message.get("group_id", group_id)),
+                            text_content=str(message.get("text_content", "")),
+                            timestamp=restored_timestamp,
+                            sender_card=str(message["sender_card"])
+                            if message.get("sender_card")
+                            else None,
+                        )
+                    )
+
+        return deserialized, unified_messages, top_users
+
+    async def _load_analysis_checkpoint(
+        self, group_id: str, date_str: str, checkpoint_trace_id: str
+    ) -> AnalysisResultPayload | None:
+        """优先加载指定任务的分析快照，缺失时仅回退同源的每日历史。
+
+        Args:
+            group_id: 待恢复的群组标识。
+            date_str: 原分析日期。
+            checkpoint_trace_id: 原任务的追踪标识。
+
+        Returns:
+            已还原为领域模型的完整或部分结果；未命中同源快照时返回 None。
+        """
+        cached = (
+            await asyncio.to_thread(
+                self.checkpoint_store.get_checkpoint,
+                group_id,
+                date_str,
+                AnalysisStage.LLM_ANALYSIS.value,
+                trace_id=checkpoint_trace_id,
+            )
+            if self.checkpoint_store
+            else None
+        )
+        if not cached:
+            try:
+                history = await self.history_manager.get_analysis(group_id, date_str)
+                if (
+                    isinstance(history, dict)
+                    and isinstance(history.get("statistics"), (dict, GroupStatistics))
+                    and history.get("trace_id") == checkpoint_trace_id
+                ):
+                    cached = history
+            except Exception:
+                cached = None
+        return (
+            AnalysisResultSerializer.deserialize(cached)
+            if isinstance(cached, dict)
+            else None
+        )
+
+    async def _complete_missing_sections(
+        self,
+        pipeline: PipelineContext,
+        analysis_result: AnalysisResultPayload,
+        unified_messages: list[UnifiedMessage],
+        top_users: list[dict[str, object]] | None,
+        platform_id: str | None,
+    ) -> AnalysisResultPayload | None:
+        """补齐缺失的 LLM 子任务，并保留已成功生成的内容和 Token 用量。
+
+        Args:
+            pipeline: 恢复任务的阶段上下文。
+            analysis_result: 已恢复的部分分析结果。
+            unified_messages: 从清洗快照还原的消息。
+            top_users: 清洗阶段选出的活跃成员。
+            platform_id: 当前平台实例。
+
+        Returns:
+            合并后的分析结果；所有启用子任务均失败时返回 None。
+        """
+        group_id = pipeline.group_id
+        trace = pipeline.trace
+        statistics = analysis_result["statistics"]
+        topics = analysis_result["topics"]
+        user_titles = analysis_result["user_titles"]
+        user_activity = analysis_result["user_analysis"]
+        chat_quality_review = analysis_result.get("chat_quality_review")
+        golden_quotes = statistics.golden_quotes
+        total_token_usage = statistics.token_usage
+        topic_enabled = self.config_manager.get_topic_analysis_enabled()
+        user_title_enabled = self.config_manager.get_user_title_analysis_enabled()
+        golden_quote_enabled = self.config_manager.get_golden_quote_analysis_enabled()
+        chat_quality_enabled = self.config_manager.get_chat_quality_analysis_enabled()
+        run_topic = topic_enabled and not bool(topics)
+        run_user_title = user_title_enabled and not bool(user_titles)
+        run_golden_quote = golden_quote_enabled and not bool(golden_quotes)
+        run_chat_quality = chat_quality_enabled and not bool(chat_quality_review)
+
+        legacy_messages = self.statistics_service._convert_to_legacy_dict(
+            unified_messages
+        )
+        unified_msg_origin = (
+            f"{platform_id}:GroupMessage:{group_id}" if platform_id else group_id
+        )
+
+        if run_topic or run_user_title or run_golden_quote or run_chat_quality:
+            async with pipeline.step(AnalysisStage.LLM_ANALYSIS) as step:
+                async with self.task_guard.llm_slot(group_id, "resume"):
+                    (
+                        new_topics,
+                        new_user_titles,
+                        new_golden_quotes,
+                        new_tokens,
+                        new_chat_quality,
+                    ) = await self.llm_analyzer.analyze_all_concurrent(
+                        legacy_messages,
+                        user_activity,
+                        umo=unified_msg_origin,
+                        top_users=top_users,
+                        topic_enabled=run_topic,
+                        user_title_enabled=run_user_title,
+                        golden_quote_enabled=run_golden_quote,
+                        chat_quality_enabled=run_chat_quality,
+                    )
+                    if run_topic:
+                        topics = new_topics
+                    if run_user_title:
+                        user_titles = new_user_titles
+                    if run_golden_quote:
+                        golden_quotes = new_golden_quotes
+                    if run_chat_quality:
+                        chat_quality_review = new_chat_quality
+
+                    total_token_usage = TokenUsage(
+                        prompt_tokens=total_token_usage.prompt_tokens
+                        + new_tokens.prompt_tokens,
+                        completion_tokens=total_token_usage.completion_tokens
+                        + new_tokens.completion_tokens,
+                        total_tokens=total_token_usage.total_tokens
+                        + new_tokens.total_tokens,
+                    )
+
+                enabled_count = sum(
+                    [
+                        bool(run_topic),
+                        bool(run_user_title),
+                        bool(run_golden_quote),
+                        bool(run_chat_quality),
+                    ]
+                )
+                success_count = sum(
+                    [
+                        bool(new_topics) if run_topic else False,
+                        bool(new_user_titles) if run_user_title else False,
+                        bool(new_golden_quotes) if run_golden_quote else False,
+                        bool(new_chat_quality) if run_chat_quality else False,
+                    ]
+                )
+
+                if enabled_count > 0 and success_count == 0:
+                    step.mark_failed(
+                        "续跑大模型文本分析所有启用的子任务均调用失败或重试耗尽，已中断后续任务"
+                    )
+                    if trace:
+                        trace.metadata["has_warnings"] = False
+                        trace.metadata["failure_stage"] = (
+                            AnalysisStage.LLM_ANALYSIS.value
+                        )
+                    return None
+                if enabled_count > 0 and success_count < enabled_count:
+                    step.mark_warning(
+                        f"续跑大模型文本分析部分子任务未产出结果 ({success_count}/{enabled_count} 成功)"
+                    )
+                    if trace:
+                        trace.metadata["has_warnings"] = True
+
+        statistics.golden_quotes = golden_quotes
+        statistics.token_usage = total_token_usage
+
+        return {
+            "statistics": statistics,
+            "topics": topics,
+            "user_titles": user_titles,
+            "user_analysis": user_activity,
+            "chat_quality_review": chat_quality_review,
+        }

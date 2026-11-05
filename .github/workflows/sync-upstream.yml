@@ -27,8 +27,8 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add vendor/unified_message.py vendor/prompts.json LICENSE upstream.lock.json
+          git add vendor LICENSE upstream.lock.json
           if ! git diff --cached --quiet; then
-            git commit -m 'chore: 自动同步并验证上游消息契约与提示词'
+            git commit -m 'chore: 自动同步并验证上游完整引擎、模板和提示词'
             git push origin HEAD:${{ github.event.repository.default_branch }}
           fi

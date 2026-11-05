@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -22,6 +23,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS deliveries (
                     stream TEXT NOT NULL, day TEXT NOT NULL, status TEXT NOT NULL,
                     PRIMARY KEY (stream, day));
+                CREATE TABLE IF NOT EXISTS kv (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
 
     @contextmanager
@@ -61,3 +64,12 @@ class Store:
     def finish(self, stream: str, day: str, status: str) -> None:
         with self.connect() as db:
             db.execute("UPDATE deliveries SET status=? WHERE stream=? AND day=?", (status, stream, day))
+
+    def kv_get(self, key: str, default: object = None) -> object:
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def kv_put(self, key: str, value: object) -> None:
+        with self.connect() as db:
+            db.execute("INSERT OR REPLACE INTO kv VALUES (?, ?)", (key, json.dumps(value, ensure_ascii=False)))
